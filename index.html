@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MultiScreen — vários players na mesma tela</title>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
+<style>
+  :root {
+    --bg: #0d0f14;
+    --panel: #161a22;
+    --panel-2: #1f2530;
+    --border: #2a303c;
+    --accent: #4f8cff;
+    --accent-hover: #6ba0ff;
+    --text: #e7ebf2;
+    --muted: #8b93a3;
+    --danger: #ff5a5a;
+    --gap: 6px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* Toolbar */
+  header {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    padding: 10px 12px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+  header .brand {
+    font-weight: 700;
+    font-size: 15px;
+    letter-spacing: .3px;
+    margin-right: 6px;
+    white-space: nowrap;
+  }
+  header .brand span { color: var(--accent); }
+  .url-form { display: flex; flex: 1 1 320px; min-width: 220px; gap: 6px; }
+  input[type="text"] {
+    flex: 1;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 9px 12px;
+    border-radius: 8px;
+    font-size: 14px;
+    outline: none;
+  }
+  input[type="text"]:focus { border-color: var(--accent); }
+  button {
+    background: var(--panel-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    padding: 9px 14px;
+    border-radius: 8px;
+    font-size: 14px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background .15s, border-color .15s;
+  }
+  button:hover { background: #2a3140; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button.primary:hover { background: var(--accent-hover); }
+  .controls { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .controls label { color: var(--muted); font-size: 13px; }
+  select {
+    background: var(--panel-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    padding: 9px 10px;
+    border-radius: 8px;
+    font-size: 14px;
+  }
+
+  /* Grid */
+  #grid {
+    position: relative; /* ancora o overlay .empty aqui, não na viewport inteira */
+    flex: 1;
+    display: grid;
+    gap: var(--gap);
+    padding: var(--gap);
+    grid-auto-rows: 1fr;
+    min-height: 0;
+  }
+  /* Quando a grade inteira entra em tela cheia */
+  #grid:fullscreen { width: 100vw; height: 100vh; background: var(--bg); }
+  #grid:-webkit-full-screen { width: 100vw; height: 100vh; background: var(--bg); }
+
+  .cell {
+    position: relative;
+    background: #000;
+    border-radius: 10px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    min-height: 0;
+  }
+  .cell video, .cell iframe {
+    width: 100%;
+    height: 100%;
+    display: block;
+    border: 0;
+    object-fit: contain;
+    background: #000;
+  }
+  .cell-bar {
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 8px;
+    background: linear-gradient(to bottom, rgba(0,0,0,.65), rgba(0,0,0,0));
+    opacity: 0;
+    transition: opacity .15s;
+    z-index: 2;
+    pointer-events: none;
+  }
+  .cell:hover .cell-bar { opacity: 1; }
+  .cell-bar .title {
+    font-size: 12px;
+    color: #dfe4ee;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-shadow: 0 1px 2px #000;
+  }
+  .cell-bar .btns { display: flex; gap: 4px; pointer-events: auto; }
+  .cell-bar button {
+    padding: 4px 8px;
+    font-size: 12px;
+    border-radius: 6px;
+    background: rgba(20,24,32,.85);
+  }
+  .cell-bar button.close:hover { background: var(--danger); border-color: var(--danger); }
+
+  /* Empty state */
+  .empty {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    color: var(--muted);
+    text-align: center;
+    padding: 20px;
+  }
+  .empty strong { color: var(--text); font-size: 18px; }
+  .empty small { max-width: 460px; line-height: 1.5; }
+  .empty code { background: var(--panel-2); padding: 2px 6px; border-radius: 4px; color: var(--accent-hover); }
+  .hint { color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+  <header>
+    <div class="brand">Multi<span>Screen</span></div>
+    <form class="url-form" id="urlForm">
+      <input type="text" id="urlInput" placeholder="Cole qualquer URL: .mp4, .m3u8, YouTube, Twitch, ou link de ~1800 sites (via servidor)…" autocomplete="off">
+      <button type="submit" class="primary">Adicionar</button>
+    </form>
+    <div class="controls">
+      <label for="layoutSelect">Layout</label>
+      <select id="layoutSelect">
+        <option value="auto">Automático</option>
+        <option value="1">1 coluna</option>
+        <option value="2">2 colunas</option>
+        <option value="3">3 colunas</option>
+        <option value="4">4 colunas</option>
+      </select>
+      <button id="muteAllBtn" title="Silenciar/ativar todos">🔇 Mudo</button>
+      <button id="fsAllBtn" title="Tela cheia com todos os vídeos">⛶ Tela cheia</button>
+      <button id="saveBtn" title="Salvar os sites atuais neste navegador">💾 Salvar</button>
+      <button id="loadBtn" title="Recarregar a última grade salva">📂 Carregar</button>
+      <button id="clearBtn" title="Remover todos">🗑 Limpar</button>
+    </div>
+  </header>
+
+  <div id="grid">
+    <div class="empty" id="emptyState">
+      <strong>Nenhum player ainda</strong>
+      <small>
+        Cole a URL de um vídeo lá em cima e clique em <b>Adicionar</b>.
+        Funciona com arquivos <code>.mp4</code>/<code>.webm</code>, streams <code>.m3u8</code>,
+        e links do <b>YouTube</b>, <b>Vimeo</b>, <b>Twitch</b> e <b>Dailymotion</b>.<br>
+        Qualquer outro site é resolvido pelo <b>servidor (yt-dlp)</b> — ~1800 sites suportados.
+      </small>
+    </div>
+  </div>
+
+<script>
+(function () {
+  "use strict";
+
+  const grid = document.getElementById("grid");
+  const emptyState = document.getElementById("emptyState");
+  const urlForm = document.getElementById("urlForm");
+  const urlInput = document.getElementById("urlInput");
+  const layoutSelect = document.getElementById("layoutSelect");
+  const muteAllBtn = document.getElementById("muteAllBtn");
+  const fsAllBtn = document.getElementById("fsAllBtn");
+  const saveBtn = document.getElementById("saveBtn");
+  const loadBtn = document.getElementById("loadBtn");
+  const clearBtn = document.getElementById("clearBtn");
+  const STORAGE_KEY = "multiscreen.grid.v1";
+
+  const players = []; // { id, cell, url }
+  let nextId = 1;
+  let allMuted = true;
+
+  /* ---------- Detecção do tipo de fonte ---------- */
+
+  function parseSource(raw) {
+    let url = raw.trim();
+    if (!url) return null;
+    // Adiciona protocolo se faltar
+    if (!/^https?:\/\//i.test(url) && !/^\/\//.test(url)) {
+      url = "https://" + url;
+    }
+
+    let u;
+    try { u = new URL(url); } catch (e) { return { type: "invalid", url: raw }; }
+    const host = u.hostname.replace(/^www\./, "").toLowerCase();
+    const path = u.pathname;
+
+    // YouTube
+    if (host === "youtu.be") {
+      const id = path.slice(1);
+      if (id) return { type: "iframe", url: ytEmbed(id, u), title: "YouTube" };
+    }
+    if (host.endsWith("youtube.com")) {
+      if (path === "/watch") {
+        const id = u.searchParams.get("v");
+        if (id) return { type: "iframe", url: ytEmbed(id, u), title: "YouTube" };
+      }
+      const m = path.match(/^\/(embed|shorts|live)\/([^/?]+)/);
+      if (m) return { type: "iframe", url: ytEmbed(m[2], u), title: "YouTube" };
+    }
+
+    // Vimeo
+    if (host.endsWith("vimeo.com")) {
+      const m = path.match(/(\d+)/);
+      if (m) return { type: "iframe", url: "https://player.vimeo.com/video/" + m[1], title: "Vimeo" };
+    }
+
+    // Twitch (canal ao vivo, VOD ou clip)
+    if (host.endsWith("twitch.tv")) {
+      const parent = location.hostname || "localhost";
+      const vod = path.match(/\/videos\/(\d+)/);
+      if (vod) return { type: "iframe", url: `https://player.twitch.tv/?video=${vod[1]}&parent=${parent}&autoplay=true&muted=true`, title: "Twitch VOD" };
+      const chan = path.match(/^\/([A-Za-z0-9_]+)$/);
+      if (chan) return { type: "iframe", url: `https://player.twitch.tv/?channel=${chan[1]}&parent=${parent}&autoplay=true&muted=true`, title: "Twitch" };
+    }
+    if (host === "clips.twitch.tv") {
+      const parent = location.hostname || "localhost";
+      const clip = path.slice(1);
+      if (clip) return { type: "iframe", url: `https://clips.twitch.tv/embed?clip=${clip}&parent=${parent}&autoplay=true&muted=true`, title: "Twitch Clip" };
+    }
+
+    // Dailymotion
+    if (host.endsWith("dailymotion.com")) {
+      const m = path.match(/\/video\/([^_?/]+)/);
+      if (m) return { type: "iframe", url: "https://www.dailymotion.com/embed/video/" + m[1], title: "Dailymotion" };
+    }
+    if (host === "dai.ly") {
+      const id = path.slice(1);
+      if (id) return { type: "iframe", url: "https://www.dailymotion.com/embed/video/" + id, title: "Dailymotion" };
+    }
+
+    // HLS stream
+    if (/\.m3u8($|\?)/i.test(path + u.search)) {
+      return { type: "hls", url, title: fileName(path) };
+    }
+
+    // Arquivo de vídeo direto
+    if (/\.(mp4|webm|ogg|ogv|mov|m4v)($|\?)/i.test(path + u.search)) {
+      return { type: "file", url, title: fileName(path) };
+    }
+
+    // Qualquer outro site: pede ao back-end (yt-dlp) pra resolver o stream.
+    return { type: "resolve", url, title: host };
+  }
+
+  function ytEmbed(id, u) {
+    const params = new URLSearchParams({ autoplay: "1", mute: "1", rel: "0" });
+    const t = u.searchParams.get("t") || u.searchParams.get("start");
+    if (t) params.set("start", String(parseInt(t, 10) || 0));
+    return `https://www.youtube.com/embed/${id}?${params.toString()}`;
+  }
+
+  function fileName(path) {
+    try { return decodeURIComponent(path.split("/").pop()) || "vídeo"; }
+    catch (e) { return "vídeo"; }
+  }
+
+  /* ---------- Criação de players ---------- */
+
+  function addPlayer(raw) {
+    const src = parseSource(raw);
+    if (!src) return;
+    if (src.type === "invalid") { alert("URL inválida: " + raw); return; }
+
+    const id = nextId++;
+    const cell = document.createElement("div");
+    cell.className = "cell";
+    cell.dataset.id = id;
+
+    const bar = document.createElement("div");
+    bar.className = "cell-bar";
+    bar.innerHTML =
+      '<span class="title">' + escapeHtml(src.title || src.url) + '</span>' +
+      '<span class="btns">' +
+        '<button class="reload" title="Recarregar este vídeo">↻</button>' +
+        '<button class="fs" title="Tela cheia">⛶</button>' +
+        '<button class="close" title="Fechar">✕</button>' +
+      '</span>';
+    bar.querySelector(".close").addEventListener("click", () => removePlayer(id));
+    bar.querySelector(".reload").addEventListener("click", () => reloadPlayer(id));
+    bar.querySelector(".fs").addEventListener("click", () => {
+      if (cell.requestFullscreen) cell.requestFullscreen();
+    });
+    cell.appendChild(bar);
+    grid.appendChild(cell);
+
+    const rec = { id, cell, bar, raw, url: src.url, media: null };
+    players.push(rec);
+    updateLayout();
+    mountMedia(rec, src);
+  }
+
+  // Monta a mídia (iframe / vídeo / resolve) dentro da célula do player.
+  function mountMedia(rec, src) {
+    if (src.type === "iframe") {
+      const iframe = document.createElement("iframe");
+      iframe.src = src.url;
+      iframe.allow = "autoplay; encrypted-media; picture-in-picture; fullscreen";
+      iframe.allowFullscreen = true;
+      rec.cell.insertBefore(iframe, rec.bar);
+      rec.media = iframe;
+    } else if (src.type === "resolve") {
+      resolveAndPlay(rec, src);
+    } else {
+      rec.media = makeVideo(rec, src.type === "hls", src.url);
+      rec.cell.insertBefore(rec.media, rec.bar);
+    }
+  }
+
+  // Recria só este player, no mesmo lugar (útil quando trava no meio).
+  function reloadPlayer(id) {
+    const rec = players.find(p => p.id === id);
+    if (!rec) return;
+    if (rec.media && rec.media._hls) rec.media._hls.destroy();
+    if (rec.media) rec.media.remove();
+    rec.media = null;
+    rec.cell.querySelectorAll(".empty").forEach(el => el.remove());
+    const src = parseSource(rec.raw);
+    if (!src || src.type === "invalid") return;
+    mountMedia(rec, src);
+  }
+
+  // Cria um <video> (com hls.js quando necessário) já ligado ao stream.
+  function makeVideo(rec, useHls, url) {
+    const video = document.createElement("video");
+    video.controls = true;
+    video.autoplay = true;
+    video.muted = allMuted;
+    video.playsInline = true;
+    if (useHls && window.Hls && !video.canPlayType("application/vnd.apple.mpegurl")) {
+      if (Hls.isSupported()) {
+        const hls = new Hls();
+        hls.loadSource(url);
+        hls.attachMedia(video);
+        video._hls = hls;
+        hls.on(Hls.Events.ERROR, (_e, data) => { if (data.fatal) showError(rec.cell, url); });
+      } else {
+        video.src = url;
+      }
+    } else {
+      video.src = url;
+    }
+    video.addEventListener("error", () => showError(rec.cell, url));
+    return video;
+  }
+
+  // Pede ao back-end (yt-dlp) o stream real e então cria o player.
+  function resolveAndPlay(rec, src) {
+    const loading = document.createElement("div");
+    loading.className = "empty";
+    loading.innerHTML = '<strong>Resolvendo via servidor…</strong>' +
+      '<small>Procurando o stream de <code>' + escapeHtml(src.title || src.url) +
+      '</code> com o yt-dlp.</small>';
+    rec.cell.insertBefore(loading, rec.cell.firstChild);
+
+    fetch("/api/resolve?url=" + encodeURIComponent(src.url))
+      .then(r => r.json())
+      .then(data => {
+        loading.remove();
+        if (!data.ok) { showError(rec.cell, src.url, data.error); return; }
+        const titleEl = rec.cell.querySelector(".cell-bar .title");
+        if (titleEl && data.title) titleEl.textContent = data.title;
+        rec.media = makeVideo(rec, data.isHls, data.stream);
+        rec.cell.insertBefore(rec.media, rec.cell.querySelector(".cell-bar"));
+      })
+      .catch(() => {
+        loading.remove();
+        showError(rec.cell, src.url,
+          "Servidor indisponível. Rode 'python server.py' e acesse por http://localhost:8000");
+      });
+  }
+
+  function showError(cell, url, detail) {
+    if (cell.querySelector(".error")) return;
+    const err = document.createElement("div");
+    err.className = "empty error";
+    err.innerHTML = '<strong>Não deu pra carregar 😕</strong><small>' +
+      (detail
+        ? escapeHtml(detail)
+        : "O servidor do vídeo pode bloquear reprodução externa (CORS/hotlink), " +
+          "exigir DRM, ou o link expirou.") +
+      '<br><code>' + escapeHtml(url) + '</code></small>';
+    cell.appendChild(err);
+  }
+
+  function removePlayer(id) {
+    const idx = players.findIndex(p => p.id === id);
+    if (idx === -1) return;
+    const p = players[idx];
+    if (p.media && p.media._hls) p.media._hls.destroy();
+    p.cell.remove();
+    players.splice(idx, 1);
+    updateLayout();
+  }
+
+  /* ---------- Layout ---------- */
+
+  function updateLayout() {
+    emptyState.style.display = players.length ? "none" : "flex";
+    if (!players.length) { grid.style.gridTemplateColumns = "1fr"; return; }
+
+    const mode = layoutSelect.value;
+    let cols;
+    if (mode === "auto") {
+      cols = Math.ceil(Math.sqrt(players.length));
+    } else {
+      cols = Math.min(parseInt(mode, 10), players.length);
+    }
+    grid.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+  }
+
+  /* ---------- Utilidades ---------- */
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => (
+      { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+    ));
+  }
+
+  /* ---------- Eventos ---------- */
+
+  urlForm.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const val = urlInput.value.trim();
+    if (!val) return;
+    // Permite colar várias URLs separadas por espaço ou quebra de linha
+    val.split(/[\s\n]+/).filter(Boolean).forEach(addPlayer);
+    urlInput.value = "";
+    urlInput.focus();
+  });
+
+  layoutSelect.addEventListener("change", updateLayout);
+
+  muteAllBtn.addEventListener("click", () => {
+    allMuted = !allMuted;
+    players.forEach(p => { if (p.media.tagName === "VIDEO") p.media.muted = allMuted; });
+    muteAllBtn.textContent = allMuted ? "🔇 Mudo" : "🔊 Som";
+    if (!allMuted) alert("Obs.: só players de arquivo direto (mp4/hls) respondem ao mudo global. YouTube/Vimeo/Twitch têm controle próprio dentro do player.");
+  });
+
+  fsAllBtn.addEventListener("click", () => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen();
+    } else if (grid.requestFullscreen) {
+      grid.requestFullscreen();
+    } else if (grid.webkitRequestFullscreen) {
+      grid.webkitRequestFullscreen();
+    }
+  });
+
+  document.addEventListener("fullscreenchange", () => {
+    const on = document.fullscreenElement === grid;
+    fsAllBtn.textContent = on ? "🡼 Sair" : "⛶ Tela cheia";
+  });
+
+  function saveGrid() {
+    const data = { layout: layoutSelect.value, urls: players.map(p => p.raw) };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  }
+
+  function loadGrid() {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) { alert("Nenhuma grade salva ainda. Clique em 💾 Salvar primeiro."); return; }
+    let data;
+    try { data = JSON.parse(raw); } catch (e) { alert("Grade salva corrompida."); return; }
+    const urls = (data && data.urls) || [];
+    if (!urls.length) { alert("A grade salva está vazia."); return; }
+    [...players].forEach(p => removePlayer(p.id));
+    if (data.layout) layoutSelect.value = data.layout;
+    urls.forEach(u => addPlayer(u));
+  }
+
+  saveBtn.addEventListener("click", () => {
+    if (!players.length) { alert("Adicione pelo menos um vídeo antes de salvar."); return; }
+    saveGrid();
+    const original = saveBtn.textContent;
+    saveBtn.textContent = "✓ Salvo";
+    setTimeout(() => { saveBtn.textContent = original; }, 1200);
+  });
+
+  loadBtn.addEventListener("click", loadGrid);
+
+  clearBtn.addEventListener("click", () => {
+    if (players.length && confirm("Remover todos os players?")) {
+      [...players].forEach(p => removePlayer(p.id));
+    }
+  });
+
+  // Suporte a ?add=url1,url2 na URL da página (para salvar configurações)
+  const startUrls = new URLSearchParams(location.search).get("add");
+  if (startUrls) startUrls.split(",").forEach(u => addPlayer(u));
+
+  urlInput.focus();
+})();
+</script>
+</body>
+</html>
