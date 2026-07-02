@@ -163,6 +163,62 @@
   .empty small { max-width: 460px; line-height: 1.5; }
   .empty code { background: var(--panel-2); padding: 2px 6px; border-radius: 4px; color: var(--accent-hover); }
   .hint { color: var(--muted); font-size: 12px; }
+
+  /* Modais (salvar / carregar) */
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,.6);
+    display: none;
+    align-items: flex-start;
+    justify-content: center;
+    padding: 60px 16px;
+    z-index: 100;
+  }
+  .modal-backdrop.open { display: flex; }
+  .modal {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    width: 100%;
+    max-width: 460px;
+    padding: 18px;
+    box-shadow: 0 20px 60px rgba(0,0,0,.5);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    max-height: calc(100vh - 120px);
+  }
+  .modal h3 { font-size: 16px; font-weight: 700; }
+  .modal .modal-sub { color: var(--muted); font-size: 13px; margin-top: -6px; }
+  .modal input[type="text"] { flex: none; width: 100%; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+  .saved-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    overflow-y: auto;
+    max-height: 46vh;
+  }
+  .saved-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 10px;
+  }
+  .saved-item .info { flex: 1; min-width: 0; cursor: pointer; }
+  .saved-item .info .name {
+    font-size: 14px; font-weight: 600;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .saved-item .info .meta { color: var(--muted); font-size: 12px; }
+  .saved-item .del { padding: 5px 9px; font-size: 13px; }
+  .saved-item .del:hover { background: var(--danger); border-color: var(--danger); }
+  .saved-empty { color: var(--muted); font-size: 13px; text-align: center; padding: 16px; }
 </style>
 </head>
 <body>
@@ -183,8 +239,8 @@
       </select>
       <button id="muteAllBtn" title="Silenciar/ativar todos">🔇 Mudo</button>
       <button id="fsAllBtn" title="Tela cheia com todos os vídeos">⛶ Tela cheia</button>
-      <button id="saveBtn" title="Salvar os sites atuais neste navegador">💾 Salvar</button>
-      <button id="loadBtn" title="Recarregar a última grade salva">📂 Carregar</button>
+      <button id="saveBtn" title="Salvar os sites atuais com um nome">💾 Salvar</button>
+      <button id="loadBtn" title="Buscar e carregar um MultiScreen salvo">📂 Carregar</button>
       <button id="clearBtn" title="Remover todos">🗑 Limpar</button>
     </div>
   </header>
@@ -198,6 +254,33 @@
         e links do <b>YouTube</b>, <b>Vimeo</b>, <b>Twitch</b> e <b>Dailymotion</b>.<br>
         Qualquer outro site é resolvido pelo <b>servidor (yt-dlp)</b> — ~1800 sites suportados.
       </small>
+    </div>
+  </div>
+
+  <!-- Modal: salvar -->
+  <div class="modal-backdrop" id="saveModal">
+    <div class="modal">
+      <h3>Salvar MultiScreen</h3>
+      <div class="modal-sub">Dê um nome para esta configuração de players.</div>
+      <form id="saveForm">
+        <input type="text" id="saveName" placeholder="Ex.: Notícias, Jogos, Câmeras…" autocomplete="off">
+      </form>
+      <div class="modal-actions">
+        <button type="button" id="saveCancel">Cancelar</button>
+        <button type="button" id="saveConfirm" class="primary">💾 Salvar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: carregar -->
+  <div class="modal-backdrop" id="loadModal">
+    <div class="modal">
+      <h3>Carregar MultiScreen</h3>
+      <input type="text" id="loadSearch" placeholder="Buscar pelo nome…" autocomplete="off">
+      <div class="saved-list" id="savedList"></div>
+      <div class="modal-actions">
+        <button type="button" id="loadCancel">Fechar</button>
+      </div>
     </div>
   </div>
 
@@ -215,7 +298,17 @@
   const saveBtn = document.getElementById("saveBtn");
   const loadBtn = document.getElementById("loadBtn");
   const clearBtn = document.getElementById("clearBtn");
-  const STORAGE_KEY = "multiscreen.grid.v1";
+  const saveModal = document.getElementById("saveModal");
+  const saveForm = document.getElementById("saveForm");
+  const saveName = document.getElementById("saveName");
+  const saveCancel = document.getElementById("saveCancel");
+  const saveConfirm = document.getElementById("saveConfirm");
+  const loadModal = document.getElementById("loadModal");
+  const loadSearch = document.getElementById("loadSearch");
+  const savedList = document.getElementById("savedList");
+  const loadCancel = document.getElementById("loadCancel");
+  const STORAGE_KEY = "multiscreen.grid.v1";   // legado (grade única antiga)
+  const STORE_KEY = "multiscreen.saved.v1";    // coleção de multiscreens nomeados
 
   const players = []; // { id, cell, url }
   let nextId = 1;
@@ -504,32 +597,139 @@
     fsAllBtn.textContent = on ? "🡼 Sair" : "⛶ Tela cheia";
   });
 
-  function saveGrid() {
-    const data = { layout: layoutSelect.value, urls: players.map(p => p.raw) };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  // Lê/grava a coleção de multiscreens salvos (objeto: nome -> {layout, urls, ts}).
+  function readStore() {
+    let store = {};
+    try { store = JSON.parse(localStorage.getItem(STORE_KEY)) || {}; } catch (e) { store = {}; }
+    // Migração: se existir a grade única antiga, traz como "Configuração anterior".
+    const legacy = localStorage.getItem(STORAGE_KEY);
+    if (legacy && !store.__migrated) {
+      try {
+        const d = JSON.parse(legacy);
+        if (d && d.urls && d.urls.length && !store["Configuração anterior"]) {
+          store["Configuração anterior"] = { layout: d.layout || "auto", urls: d.urls, ts: Date.now() };
+        }
+      } catch (e) {}
+      store.__migrated = true;
+      localStorage.removeItem(STORAGE_KEY);
+      writeStore(store);
+    }
+    return store;
+  }
+  function writeStore(store) {
+    localStorage.setItem(STORE_KEY, JSON.stringify(store));
+  }
+  function savedNames(store) {
+    return Object.keys(store).filter(k => k !== "__migrated");
   }
 
-  function loadGrid() {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) { alert("Nenhuma grade salva ainda. Clique em 💾 Salvar primeiro."); return; }
-    let data;
-    try { data = JSON.parse(raw); } catch (e) { alert("Grade salva corrompida."); return; }
-    const urls = (data && data.urls) || [];
-    if (!urls.length) { alert("A grade salva está vazia."); return; }
-    [...players].forEach(p => removePlayer(p.id));
-    if (data.layout) layoutSelect.value = data.layout;
-    urls.forEach(u => addPlayer(u));
-  }
-
-  saveBtn.addEventListener("click", () => {
+  function openSaveModal() {
     if (!players.length) { alert("Adicione pelo menos um vídeo antes de salvar."); return; }
-    saveGrid();
+    saveName.value = "";
+    saveModal.classList.add("open");
+    saveName.focus();
+  }
+  function closeSaveModal() { saveModal.classList.remove("open"); }
+
+  function doSave() {
+    const name = saveName.value.trim();
+    if (!name) { saveName.focus(); return; }
+    const store = readStore();
+    if (savedNames(store).includes(name) &&
+        !confirm(`Já existe um MultiScreen chamado "${name}". Sobrescrever?`)) {
+      return;
+    }
+    store[name] = { layout: layoutSelect.value, urls: players.map(p => p.raw), ts: Date.now() };
+    writeStore(store);
+    closeSaveModal();
     const original = saveBtn.textContent;
     saveBtn.textContent = "✓ Salvo";
     setTimeout(() => { saveBtn.textContent = original; }, 1200);
-  });
+  }
 
-  loadBtn.addEventListener("click", loadGrid);
+  function applyConfig(cfg) {
+    const urls = (cfg && cfg.urls) || [];
+    if (!urls.length) { alert("Essa configuração está vazia."); return; }
+    [...players].forEach(p => removePlayer(p.id));
+    if (cfg.layout) layoutSelect.value = cfg.layout;
+    updateLayout();
+    urls.forEach(u => addPlayer(u));
+  }
+
+  function openLoadModal() {
+    loadSearch.value = "";
+    renderSavedList("");
+    loadModal.classList.add("open");
+    loadSearch.focus();
+  }
+  function closeLoadModal() { loadModal.classList.remove("open"); }
+
+  function renderSavedList(filter) {
+    const store = readStore();
+    const q = (filter || "").trim().toLowerCase();
+    const names = savedNames(store)
+      .filter(n => n.toLowerCase().includes(q))
+      .sort((a, b) => (store[b].ts || 0) - (store[a].ts || 0));
+
+    savedList.innerHTML = "";
+    if (!names.length) {
+      const empty = document.createElement("div");
+      empty.className = "saved-empty";
+      empty.textContent = savedNames(store).length
+        ? "Nenhum resultado para essa busca."
+        : "Nenhum MultiScreen salvo ainda.";
+      savedList.appendChild(empty);
+      return;
+    }
+
+    names.forEach(name => {
+      const cfg = store[name];
+      const item = document.createElement("div");
+      item.className = "saved-item";
+
+      const info = document.createElement("div");
+      info.className = "info";
+      const count = (cfg.urls || []).length;
+      const when = cfg.ts ? new Date(cfg.ts).toLocaleString() : "";
+      info.innerHTML =
+        '<div class="name">' + escapeHtml(name) + '</div>' +
+        '<div class="meta">' + count + (count === 1 ? ' player' : ' players') +
+        (when ? ' • ' + escapeHtml(when) : '') + '</div>';
+      info.addEventListener("click", () => { applyConfig(cfg); closeLoadModal(); });
+
+      const del = document.createElement("button");
+      del.className = "del";
+      del.textContent = "🗑";
+      del.title = "Excluir";
+      del.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (confirm(`Excluir o MultiScreen "${name}"?`)) {
+          const s = readStore();
+          delete s[name];
+          writeStore(s);
+          renderSavedList(loadSearch.value);
+        }
+      });
+
+      item.appendChild(info);
+      item.appendChild(del);
+      savedList.appendChild(item);
+    });
+  }
+
+  saveBtn.addEventListener("click", openSaveModal);
+  saveCancel.addEventListener("click", closeSaveModal);
+  saveConfirm.addEventListener("click", doSave);
+  saveForm.addEventListener("submit", (e) => { e.preventDefault(); doSave(); });
+  saveModal.addEventListener("click", (e) => { if (e.target === saveModal) closeSaveModal(); });
+
+  loadBtn.addEventListener("click", openLoadModal);
+  loadCancel.addEventListener("click", closeLoadModal);
+  loadSearch.addEventListener("input", () => renderSavedList(loadSearch.value));
+  loadModal.addEventListener("click", (e) => { if (e.target === loadModal) closeLoadModal(); });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { closeSaveModal(); closeLoadModal(); }
+  });
 
   clearBtn.addEventListener("click", () => {
     if (players.length && confirm("Remover todos os players?")) {
