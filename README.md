@@ -16,6 +16,7 @@ Cole a URL de qualquer vídeo e ele aparece num player da grade. Funciona com ar
 - **Salvar / Carregar** a grade atual (fica no navegador via `localStorage`).
 - **Recarregar** um player individual (útil quando o stream trava no meio).
 - Botão de **mudo** global.
+- **🗂 Tabs** — adiciona **todas as guias abertas do navegador** de uma vez (requer a extensão companheira, veja abaixo).
 
 ## Como rodar
 
@@ -34,6 +35,23 @@ python server.py        # porta 8000 (ou: python server.py 8080)
 Depois acesse **http://localhost:8000** no navegador (use um navegador moderno — Chrome, Edge, Firefox).
 
 > Por que via servidor e não abrindo o `index.html` direto? Vários embeds (ex.: YouTube) só funcionam sob `http://`, e os ~1800 sites extras dependem do back-end (yt-dlp + proxy).
+
+## Adicionar todas as guias abertas (extensão)
+
+Uma página web não consegue ler as URLs das outras guias (restrição de segurança do navegador), então o repositório inclui uma mini-extensão em **`extension/`** que faz essa ponte.
+
+**Instalação (uma vez só, Chrome ou Edge):**
+
+1. Abra `chrome://extensions` (ou `edge://extensions`).
+2. Ative o **Modo do desenvolvedor** (canto superior direito).
+3. Clique em **Carregar sem compactação** e escolha a pasta **`extension/`** deste projeto.
+
+**Uso:**
+
+- No MultiScreen, clique em **🗂 Tabs** — todas as guias abertas (todas as janelas) entram na grade de uma vez.
+- Ou clique no **ícone da extensão** de qualquer guia: ele acha (ou abre) o MultiScreen e joga tudo lá, sem recarregar os vídeos que já estão tocando.
+
+Guias repetidas e as que já estão na grade são ignoradas; guias que não são vídeo mostram um erro no tile — é só fechar.
 
 ## Como funciona
 

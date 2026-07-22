@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "MultiScreen Tabs",
+  "version": "1.0",
+  "description": "Sends every open browser tab to your MultiScreen video wall in one click.",
+  "permissions": ["tabs"],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": ["http://localhost/*", "http://127.0.0.1/*"],
+      "js": ["content.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "action": { "title": "Send all open tabs to MultiScreen" }
+}

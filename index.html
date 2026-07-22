@@ -449,6 +449,7 @@
       <button type="submit" class="primary">Add</button>
       <button type="button" id="localBtn" title="Add a video file from your computer">📁 Local</button>
       <input type="file" id="localFileInput" accept="video/*" multiple hidden>
+      <button type="button" id="tabsBtn" title="Add every open browser tab (needs the MultiScreen Tabs extension)">🗂 Tabs</button>
     </form>
     <div class="controls">
       <label for="layoutSelect">Layout</label>
@@ -614,6 +615,7 @@
   const progressFill = document.getElementById("progressFill");
   const localBtn = document.getElementById("localBtn");
   const localFileInput = document.getElementById("localFileInput");
+  const tabsBtn = document.getElementById("tabsBtn");
 
   const players = []; // { id, cell, bar, raw, url, type, quality, media }
   let nextId = 1;
@@ -1632,6 +1634,65 @@
       [...players].forEach(p => removePlayer(p.id));
     }
   });
+
+  /* ---------- Add all open browser tabs (companion extension) ---------- */
+
+  // The page can't enumerate browser tabs itself — the "extension/" folder in
+  // this repo ships a tiny companion extension whose content script bridges
+  // chrome.tabs to us via window.postMessage.
+  let tabsRequestTimer = null;
+
+  window.addEventListener("message", (e) => {
+    const d = e.data;
+    if (e.source !== window || !d || d.source !== "multiscreen-ext") return;
+    if (d.type === "tabs") {
+      clearTimeout(tabsRequestTimer);
+      tabsRequestTimer = null;
+      addTabUrls((d.tabs || []).map(t => t && t.url));
+    }
+  });
+
+  // Adds a batch of tab URLs, skipping ones already on the wall.
+  function addTabUrls(urls) {
+    const existing = new Set(players.map(p => p.raw.trim()));
+    const fresh = [];
+    (urls || []).forEach(u => {
+      u = String(u || "").trim();
+      if (u && !existing.has(u)) { existing.add(u); fresh.push(u); }
+    });
+    if (!fresh.length) {
+      toast("No new tabs to add — everything is already on the wall.");
+      return;
+    }
+    fresh.forEach(u => addPlayer(u));
+    toast("Adding " + fresh.length + " tab" + (fresh.length === 1 ? "" : "s") +
+      "… Tiles that aren't videos will show an error — just close them.", 4200);
+  }
+
+  tabsBtn.addEventListener("click", () => {
+    window.postMessage({ source: "multiscreen-page", type: "get-tabs" }, "*");
+    clearTimeout(tabsRequestTimer);
+    // No answer = the bridge isn't there; point the user at the extension.
+    tabsRequestTimer = setTimeout(() => {
+      toast("MultiScreen Tabs extension not detected. Install it once: " +
+        "chrome://extensions → Developer mode → Load unpacked → pick the " +
+        "“extension” folder of this project.", 8000);
+    }, 600);
+  });
+
+  // #add=<encoded JSON array> is how the extension icon delivers tab URLs —
+  // on first load, and via hashchange when the app is already open (a
+  // hash-only change doesn't reload the page, so playing videos survive).
+  function consumeAddHash() {
+    if (!location.hash.startsWith("#add=")) return;
+    let urls = null;
+    try { urls = JSON.parse(decodeURIComponent(location.hash.slice(5))); }
+    catch (e) { /* malformed hash: ignore */ }
+    history.replaceState(null, "", location.pathname + location.search);
+    if (Array.isArray(urls)) addTabUrls(urls);
+  }
+  window.addEventListener("hashchange", consumeAddHash);
+  consumeAddHash();
 
   // Supports ?add=url1,url2 in the page URL (to bookmark setups)
   const startUrls = new URLSearchParams(location.search).get("add");
