@@ -1,19 +1,22 @@
 <!DOCTYPE html>
-<html lang="pt-BR">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>MultiScreen — vários players na mesma tela</title>
+<meta name="description" content="MultiScreen — watch multiple video streams side by side in one browser tab.">
+<title>MultiScreen — Multi-Video Wall</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='2' y='3' width='9' height='8' rx='1.5' fill='%234f8cff'/%3E%3Crect x='13' y='3' width='9' height='8' rx='1.5' fill='%238f6bff'/%3E%3Crect x='2' y='13' width='9' height='8' rx='1.5' fill='%238f6bff'/%3E%3Crect x='13' y='13' width='9' height='8' rx='1.5' fill='%234f8cff'/%3E%3C/svg%3E">
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
 <style>
   :root {
-    --bg: #0d0f14;
-    --panel: #161a22;
-    --panel-2: #1f2530;
-    --border: #2a303c;
+    --bg: #0b0d12;
+    --panel: #12151d;
+    --panel-2: #1b202b;
+    --border: #272e3b;
     --accent: #4f8cff;
+    --accent-2: #8f6bff;
     --accent-hover: #6ba0ff;
-    --text: #e7ebf2;
+    --text: #e9edf4;
     --muted: #8b93a3;
     --danger: #ff5a5a;
     --gap: 6px;
@@ -32,21 +35,26 @@
   /* Toolbar */
   header {
     display: flex;
-    gap: 8px;
+    gap: 10px;
     align-items: center;
-    padding: 10px 12px;
+    padding: 10px 14px;
     background: var(--panel);
     border-bottom: 1px solid var(--border);
     flex-wrap: wrap;
   }
-  header .brand {
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     font-weight: 700;
     font-size: 15px;
     letter-spacing: .3px;
-    margin-right: 6px;
+    margin-right: 4px;
     white-space: nowrap;
+    user-select: none;
   }
-  header .brand span { color: var(--accent); }
+  .brand svg { display: block; }
+  .brand span { color: var(--accent); }
   .url-form { display: flex; flex: 1 1 320px; min-width: 220px; gap: 6px; }
   input[type="text"] {
     flex: 1;
@@ -57,8 +65,13 @@
     border-radius: 8px;
     font-size: 14px;
     outline: none;
+    transition: border-color .15s, box-shadow .15s;
   }
-  input[type="text"]:focus { border-color: var(--accent); }
+  input[type="text"]:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(79,140,255,.18);
+  }
+  input[type="text"]::placeholder { color: #5d6575; }
   button {
     background: var(--panel-2);
     color: var(--text);
@@ -68,13 +81,26 @@
     font-size: 14px;
     cursor: pointer;
     white-space: nowrap;
-    transition: background .15s, border-color .15s;
+    transition: background .15s, border-color .15s, transform .05s;
   }
-  button:hover { background: #2a3140; }
-  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
-  button.primary:hover { background: var(--accent-hover); }
+  button:hover { background: #2a3140; border-color: #38414f; }
+  button:active { transform: translateY(1px); }
+  button.primary {
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    border-color: transparent;
+    color: #fff;
+    font-weight: 600;
+  }
+  button.primary:hover { filter: brightness(1.12); }
   .controls { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-  .controls label { color: var(--muted); font-size: 13px; }
+  .controls label {
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .6px;
+  }
+  .sep { width: 1px; height: 22px; background: var(--border); margin: 0 2px; }
   select {
     background: var(--panel-2);
     color: var(--text);
@@ -82,11 +108,21 @@
     padding: 9px 10px;
     border-radius: 8px;
     font-size: 14px;
+    cursor: pointer;
   }
+  select:focus { outline: none; border-color: var(--accent); }
+  .controls input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    accent-color: var(--accent);
+    cursor: pointer;
+    vertical-align: middle;
+  }
+  .controls label.check { cursor: pointer; }
 
   /* Grid */
   #grid {
-    position: relative; /* ancora o overlay .empty aqui, não na viewport inteira */
+    position: relative; /* anchors the .empty overlay here, not the whole viewport */
     flex: 1;
     display: grid;
     gap: var(--gap);
@@ -94,7 +130,6 @@
     grid-auto-rows: 1fr;
     min-height: 0;
   }
-  /* Quando a grade inteira entra em tela cheia */
   #grid:fullscreen { width: 100vw; height: 100vh; background: var(--bg); }
   #grid:-webkit-full-screen { width: 100vw; height: 100vh; background: var(--bg); }
 
@@ -145,6 +180,63 @@
     background: rgba(20,24,32,.85);
   }
   .cell-bar button.close:hover { background: var(--danger); border-color: var(--danger); }
+  .cell-bar select.qsel {
+    background: rgba(20,24,32,.85);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 3px 4px;
+    font-size: 11px;
+    cursor: pointer;
+    max-width: 92px;
+  }
+  .cell-bar select.qsel:focus { outline: none; border-color: var(--accent); }
+
+  /* Floating "record clip" button (top-right of each direct-video cell) */
+  .rec-btn {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    z-index: 4;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 9px;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1;
+    border-radius: 999px;
+    color: #fff;
+    background: rgba(16,19,26,.72);
+    border: 1px solid var(--border);
+    cursor: pointer;
+    opacity: .5;
+    transition: opacity .15s, background .15s, border-color .15s;
+  }
+  .cell:hover .rec-btn { opacity: 1; }
+  .rec-btn::before {
+    content: "";
+    width: 9px; height: 9px;
+    border-radius: 50%;
+    background: var(--danger);
+    flex: none;
+  }
+  .rec-btn:hover { background: rgba(16,19,26,.95); border-color: #38414f; }
+  .rec-btn.recording {
+    opacity: 1;
+    color: #fff;
+    background: var(--danger);
+    border-color: var(--danger);
+    animation: recpulse 1.1s ease-out infinite;
+  }
+  .rec-btn.recording::before { background: #fff; }
+  @keyframes recpulse {
+    0%   { box-shadow: 0 0 0 0 rgba(255,90,90,.55); }
+    70%  { box-shadow: 0 0 0 8px rgba(255,90,90,0); }
+    100% { box-shadow: 0 0 0 0 rgba(255,90,90,0); }
+  }
+  /* Leave room at the corner so the hover controls don't sit under the REC pill */
+  .cell.has-rec .cell-bar .btns { margin-right: 90px; }
 
   /* Empty state */
   .empty {
@@ -164,7 +256,29 @@
   .empty code { background: var(--panel-2); padding: 2px 6px; border-radius: 4px; color: var(--accent-hover); }
   .hint { color: var(--muted); font-size: 12px; }
 
-  /* Modais (salvar / carregar) */
+  /* Toast */
+  #toast {
+    position: fixed;
+    bottom: 22px;
+    left: 50%;
+    transform: translateX(-50%) translateY(8px);
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 10px 16px;
+    border-radius: 10px;
+    font-size: 13px;
+    box-shadow: 0 10px 30px rgba(0,0,0,.5);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .2s, transform .2s;
+    z-index: 300;
+    max-width: min(92vw, 520px);
+    text-align: center;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  /* Modals (save / load) */
   .modal-backdrop {
     position: fixed;
     inset: 0;
@@ -194,92 +308,264 @@
   .modal input[type="text"] { flex: none; width: 100%; }
   .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
-  .saved-list {
+  /* Compile modal */
+  .modal.wide { max-width: 620px; }
+  .cut-builder {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: flex-end;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px;
+  }
+  .cut-builder .field { display: flex; flex-direction: column; gap: 4px; }
+  .cut-builder .field.grow { flex: 1 1 180px; min-width: 140px; }
+  .cut-builder label {
+    color: var(--muted); font-size: 10px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .6px;
+  }
+  .cut-builder select, .cut-builder input.time-input {
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 14px;
+    outline: none;
+  }
+  .cut-builder select { width: 100%; cursor: pointer; }
+  .cut-builder select:focus,
+  .cut-builder input.time-input:focus { border-color: var(--accent); }
+  .cut-builder input.time-input {
+    width: 74px;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: .5px;
+  }
+  .time-field { display: flex; align-items: stretch; gap: 4px; }
+  .time-field button.grab {
+    padding: 0 8px; font-size: 12px; border-radius: 8px;
+    background: var(--bg); white-space: nowrap;
+  }
+  .cut-list {
+    list-style: none;
     display: flex;
     flex-direction: column;
     gap: 6px;
     overflow-y: auto;
-    max-height: 46vh;
+    max-height: 34vh;
+    margin: 0;
+    padding: 0;
   }
-  .saved-item {
+  .cut-list:empty::after {
+    content: "No cuts yet — pick a video and a range above, then “Add cut”.";
+    color: var(--muted); font-size: 13px; padding: 10px; text-align: center;
+    border: 1px dashed var(--border); border-radius: 8px;
+  }
+  .cut-item {
     display: flex;
     align-items: center;
     gap: 8px;
     background: var(--panel-2);
     border: 1px solid var(--border);
     border-radius: 8px;
-    padding: 8px 10px;
+    padding: 7px 10px;
   }
-  .saved-item .info { flex: 1; min-width: 0; cursor: pointer; }
-  .saved-item .info .name {
-    font-size: 14px; font-weight: 600;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  .cut-item .idx {
+    width: 20px; text-align: center; color: var(--muted);
+    font-size: 12px; font-weight: 700; flex: none;
   }
-  .saved-item .info .meta { color: var(--muted); font-size: 12px; }
-  .saved-item .del { padding: 5px 9px; font-size: 13px; }
-  .saved-item .del:hover { background: var(--danger); border-color: var(--danger); }
-  .saved-empty { color: var(--muted); font-size: 13px; text-align: center; padding: 16px; }
+  .cut-item .cut-info { flex: 1; min-width: 0; }
+  .cut-item .cut-title {
+    font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .cut-item .cut-range { font-size: 11px; color: var(--muted); }
+  .cut-item .cut-btns { display: flex; gap: 3px; flex: none; }
+  .cut-item .cut-btns button {
+    padding: 3px 7px; font-size: 12px; border-radius: 6px; line-height: 1;
+  }
+  .cut-item .cut-btns button.del:hover { background: var(--danger); border-color: var(--danger); }
+  .compile-progress {
+    display: none;
+    flex-direction: column;
+    gap: 8px;
+    color: var(--muted);
+    font-size: 13px;
+    text-align: center;
+    padding: 6px 0;
+  }
+  .compile-progress.show { display: flex; }
+  .progress-track {
+    width: 100%;
+    height: 10px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    overflow: hidden;
+  }
+  .progress-fill {
+    height: 100%;
+    width: 0%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    transition: width .3s ease;
+  }
+  .progress-fill.indeterminate {
+    width: 40% !important;
+    animation: indeterminate 1.1s ease-in-out infinite;
+  }
+  @keyframes indeterminate {
+    0%   { margin-left: -40%; }
+    100% { margin-left: 100%; }
+  }
+  .compile-foot {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 10px; flex-wrap: wrap;
+  }
+  .compile-foot .opts { display: flex; align-items: center; gap: 6px; }
+  .compile-foot .opts label {
+    color: var(--muted); font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .6px;
+  }
+  .total-badge { font-size: 12px; color: var(--muted); }
+  .total-badge b { color: var(--text); }
 </style>
 </head>
 <body>
   <header>
-    <div class="brand">Multi<span>Screen</span></div>
+    <div class="brand">
+      <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="2" y="3" width="9" height="8" rx="1.5" fill="#4f8cff"/>
+        <rect x="13" y="3" width="9" height="8" rx="1.5" fill="#8f6bff"/>
+        <rect x="2" y="13" width="9" height="8" rx="1.5" fill="#8f6bff"/>
+        <rect x="13" y="13" width="9" height="8" rx="1.5" fill="#4f8cff"/>
+      </svg>
+      Multi<span>Screen</span>
+    </div>
     <form class="url-form" id="urlForm">
-      <input type="text" id="urlInput" placeholder="Cole qualquer URL: .mp4, .m3u8, YouTube, Twitch, ou link de ~1800 sites (via servidor)…" autocomplete="off">
-      <button type="submit" class="primary">Adicionar</button>
+      <input type="text" id="urlInput" placeholder="Paste any URL: .mp4, .m3u8, YouTube, Twitch, or links from ~1800 sites…" autocomplete="off">
+      <button type="submit" class="primary">Add</button>
+      <button type="button" id="localBtn" title="Add a video file from your computer">📁 Local</button>
+      <input type="file" id="localFileInput" accept="video/*" multiple hidden>
     </form>
     <div class="controls">
       <label for="layoutSelect">Layout</label>
       <select id="layoutSelect">
-        <option value="auto">Automático</option>
-        <option value="1">1 coluna</option>
-        <option value="2">2 colunas</option>
-        <option value="3">3 colunas</option>
-        <option value="4">4 colunas</option>
+        <option value="auto">Auto</option>
+        <option value="1">1 column</option>
+        <option value="2">2 columns</option>
+        <option value="3">3 columns</option>
+        <option value="4">4 columns</option>
       </select>
-      <button id="muteAllBtn" title="Silenciar/ativar todos">🔇 Mudo</button>
-      <button id="fsAllBtn" title="Tela cheia com todos os vídeos">⛶ Tela cheia</button>
-      <button id="saveBtn" title="Salvar os sites atuais com um nome">💾 Salvar</button>
-      <button id="loadBtn" title="Buscar e carregar um MultiScreen salvo">📂 Carregar</button>
-      <button id="clearBtn" title="Remover todos">🗑 Limpar</button>
+      <label for="qualitySelect">Quality</label>
+      <select id="qualitySelect" title="Maximum resolution for streams resolved through the server">
+        <option value="360">360p (fastest)</option>
+        <option value="480" selected>480p (balanced)</option>
+        <option value="720">720p</option>
+        <option value="0">Source</option>
+      </select>
+      <label class="check" for="loopToggle">🔁 Loop</label>
+      <input type="checkbox" id="loopToggle" checked title="Repeat each video when it ends">
+      <span class="sep"></span>
+      <button id="shuffleBtn" title="Randomly rearrange the screens">🔀 Shuffle</button>
+      <button id="muteAllBtn" title="Mute/unmute all players">🔇 Muted</button>
+      <button id="fsAllBtn" title="Fullscreen with all videos">⛶ Fullscreen</button>
+      <span class="sep"></span>
+      <button id="saveBtn" title="Download the current setup as a .json file">💾 Save</button>
+      <button id="loadBtn" title="Load a MultiScreen from a .json file">📂 Load</button>
+      <input type="file" id="loadFileInput" accept=".json,application/json" hidden>
+      <button id="mergeBtn" title="Merge several saved .json files into a single one">🧬 Merge</button>
+      <input type="file" id="mergeFileInput" accept=".json,application/json" multiple hidden>
+      <span class="sep"></span>
+      <button id="compileBtn" title="Cut clips from your videos and export one compilation .mp4">🎬 Compile</button>
+      <button id="clearBtn" title="Remove all players">🗑 Clear</button>
     </div>
   </header>
 
   <div id="grid">
     <div class="empty" id="emptyState">
-      <strong>Nenhum player ainda</strong>
+      <strong>Your video wall is empty</strong>
       <small>
-        Cole a URL de um vídeo lá em cima e clique em <b>Adicionar</b>.
-        Funciona com arquivos <code>.mp4</code>/<code>.webm</code>, streams <code>.m3u8</code>,
-        e links do <b>YouTube</b>, <b>Vimeo</b>, <b>Twitch</b> e <b>Dailymotion</b>.<br>
-        Qualquer outro site é resolvido pelo <b>servidor (yt-dlp)</b> — ~1800 sites suportados.
+        Paste a video URL above and hit <b>Add</b>.
+        Works with <code>.mp4</code>/<code>.webm</code> files, <code>.m3u8</code> streams,
+        and links from <b>YouTube</b>, <b>Vimeo</b>, <b>Twitch</b> and <b>Dailymotion</b>.<br>
+        Any other site is resolved by the <b>server (yt-dlp)</b> — ~1800 sites supported.
       </small>
     </div>
   </div>
 
-  <!-- Modal: salvar -->
+  <div id="toast" role="status"></div>
+
+  <!-- Modal: save -->
   <div class="modal-backdrop" id="saveModal">
     <div class="modal">
-      <h3>Salvar MultiScreen</h3>
-      <div class="modal-sub">Dê um nome para esta configuração de players.</div>
+      <h3>Save MultiScreen</h3>
+      <div class="modal-sub">Give this player setup a name.</div>
       <form id="saveForm">
-        <input type="text" id="saveName" placeholder="Ex.: Notícias, Jogos, Câmeras…" autocomplete="off">
+        <input type="text" id="saveName" placeholder="E.g. News, Sports, Cameras…" autocomplete="off">
       </form>
       <div class="modal-actions">
-        <button type="button" id="saveCancel">Cancelar</button>
-        <button type="button" id="saveConfirm" class="primary">💾 Salvar</button>
+        <button type="button" id="saveCancel">Cancel</button>
+        <button type="button" id="saveConfirm" class="primary">💾 Save</button>
       </div>
     </div>
   </div>
 
-  <!-- Modal: carregar -->
-  <div class="modal-backdrop" id="loadModal">
-    <div class="modal">
-      <h3>Carregar MultiScreen</h3>
-      <input type="text" id="loadSearch" placeholder="Buscar pelo nome…" autocomplete="off">
-      <div class="saved-list" id="savedList"></div>
+  <!-- Modal: compile -->
+  <div class="modal-backdrop" id="compileModal">
+    <div class="modal wide">
+      <h3>🎬 Create compilation</h3>
+      <div class="modal-sub">Pick a video, choose a start/end (in seconds), add as many cuts as you like — then export one .mp4 with audio.</div>
+
+      <div class="cut-builder">
+        <div class="field grow">
+          <label for="cutVideo">Video</label>
+          <select id="cutVideo"></select>
+        </div>
+        <div class="field">
+          <label for="cutStart">Start (min:sec)</label>
+          <div class="time-field">
+            <input type="text" id="cutStart" class="time-input" inputmode="numeric" placeholder="00:00" value="00:00">
+            <button type="button" class="grab" id="grabStart" title="Use the selected player's current time">⤓</button>
+          </div>
+        </div>
+        <div class="field">
+          <label for="cutEnd">End (min:sec)</label>
+          <div class="time-field">
+            <input type="text" id="cutEnd" class="time-input" inputmode="numeric" placeholder="00:00" value="00:10">
+            <button type="button" class="grab" id="grabEnd" title="Use the selected player's current time">⤓</button>
+          </div>
+        </div>
+        <div class="field">
+          <label>&nbsp;</label>
+          <button type="button" id="addCutBtn" class="primary">＋ Add cut</button>
+        </div>
+      </div>
+
+      <ul class="cut-list" id="cutList"></ul>
+
+      <div class="compile-progress" id="compileProgress">
+        <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+        <div id="compileStatus">Generating your compilation…</div>
+      </div>
+
+      <div class="compile-foot">
+        <span class="total-badge" id="cutTotal">0 cuts · 0.0 s total</span>
+        <div class="opts">
+          <label for="compileRes">Resolution</label>
+          <select id="compileRes">
+            <option value="480">480p</option>
+            <option value="720" selected>720p</option>
+            <option value="1080">1080p</option>
+          </select>
+        </div>
+      </div>
+
       <div class="modal-actions">
-        <button type="button" id="loadCancel">Fechar</button>
+        <button type="button" id="compileCancel">Close</button>
+        <button type="button" id="compileGo" class="primary">🎬 Generate .mp4</button>
       </div>
     </div>
   </div>
@@ -293,33 +579,71 @@
   const urlForm = document.getElementById("urlForm");
   const urlInput = document.getElementById("urlInput");
   const layoutSelect = document.getElementById("layoutSelect");
+  const qualitySelect = document.getElementById("qualitySelect");
+  const loopToggle = document.getElementById("loopToggle");
+  const shuffleBtn = document.getElementById("shuffleBtn");
   const muteAllBtn = document.getElementById("muteAllBtn");
   const fsAllBtn = document.getElementById("fsAllBtn");
   const saveBtn = document.getElementById("saveBtn");
   const loadBtn = document.getElementById("loadBtn");
+  const mergeBtn = document.getElementById("mergeBtn");
+  const mergeFileInput = document.getElementById("mergeFileInput");
   const clearBtn = document.getElementById("clearBtn");
   const saveModal = document.getElementById("saveModal");
   const saveForm = document.getElementById("saveForm");
   const saveName = document.getElementById("saveName");
   const saveCancel = document.getElementById("saveCancel");
   const saveConfirm = document.getElementById("saveConfirm");
-  const loadModal = document.getElementById("loadModal");
-  const loadSearch = document.getElementById("loadSearch");
-  const savedList = document.getElementById("savedList");
-  const loadCancel = document.getElementById("loadCancel");
-  const STORAGE_KEY = "multiscreen.grid.v1";   // legado (grade única antiga)
-  const STORE_KEY = "multiscreen.saved.v1";    // coleção de multiscreens nomeados
+  const loadFileInput = document.getElementById("loadFileInput");
+  const toastEl = document.getElementById("toast");
+  const compileBtn = document.getElementById("compileBtn");
+  const compileModal = document.getElementById("compileModal");
+  const cutVideo = document.getElementById("cutVideo");
+  const cutStart = document.getElementById("cutStart");
+  const cutEnd = document.getElementById("cutEnd");
+  const grabStart = document.getElementById("grabStart");
+  const grabEnd = document.getElementById("grabEnd");
+  const addCutBtn = document.getElementById("addCutBtn");
+  const cutListEl = document.getElementById("cutList");
+  const cutTotal = document.getElementById("cutTotal");
+  const compileRes = document.getElementById("compileRes");
+  const compileGo = document.getElementById("compileGo");
+  const compileCancel = document.getElementById("compileCancel");
+  const compileProgress = document.getElementById("compileProgress");
+  const compileStatus = document.getElementById("compileStatus");
+  const progressFill = document.getElementById("progressFill");
+  const localBtn = document.getElementById("localBtn");
+  const localFileInput = document.getElementById("localFileInput");
 
-  const players = []; // { id, cell, url }
+  const players = []; // { id, cell, bar, raw, url, type, quality, media }
   let nextId = 1;
   let allMuted = true;
+  let loopEnabled = loopToggle.checked; // suggested ON by default
+  let toastTimer = null;
 
-  /* ---------- Detecção do tipo de fonte ---------- */
+  // Quality tiers offered per video (mirrors the global selector). An empty
+  // value means "follow the global Quality selector in the toolbar".
+  const QUALITY_OPTIONS = [
+    { value: "", label: "Auto" },
+    { value: "360", label: "360p" },
+    { value: "480", label: "480p" },
+    { value: "720", label: "720p" },
+    { value: "0", label: "Source" },
+  ];
+
+  function toast(msg, ms) {
+    toastEl.textContent = msg;
+    toastEl.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toastEl.classList.remove("show"), ms || 2800);
+  }
+
+  /* ---------- Source type detection ---------- */
 
   function parseSource(raw) {
     let url = raw.trim();
     if (!url) return null;
-    // Adiciona protocolo se faltar
+    // Add protocol if missing
     if (!/^https?:\/\//i.test(url) && !/^\/\//.test(url)) {
       url = "https://" + url;
     }
@@ -346,10 +670,10 @@
     // Vimeo
     if (host.endsWith("vimeo.com")) {
       const m = path.match(/(\d+)/);
-      if (m) return { type: "iframe", url: "https://player.vimeo.com/video/" + m[1], title: "Vimeo" };
+      if (m) return { type: "iframe", url: "https://player.vimeo.com/video/" + m[1] + (loopEnabled ? "?loop=1" : ""), title: "Vimeo" };
     }
 
-    // Twitch (canal ao vivo, VOD ou clip)
+    // Twitch (live channel, VOD or clip)
     if (host.endsWith("twitch.tv")) {
       const parent = location.hostname || "localhost";
       const vod = path.match(/\/videos\/(\d+)/);
@@ -378,12 +702,12 @@
       return { type: "hls", url, title: fileName(path) };
     }
 
-    // Arquivo de vídeo direto
+    // Direct video file
     if (/\.(mp4|webm|ogg|ogv|mov|m4v)($|\?)/i.test(path + u.search)) {
       return { type: "file", url, title: fileName(path) };
     }
 
-    // Qualquer outro site: pede ao back-end (yt-dlp) pra resolver o stream.
+    // Anything else: ask the back-end (yt-dlp) to resolve the stream.
     return { type: "resolve", url, title: host };
   }
 
@@ -391,50 +715,151 @@
     const params = new URLSearchParams({ autoplay: "1", mute: "1", rel: "0" });
     const t = u.searchParams.get("t") || u.searchParams.get("start");
     if (t) params.set("start", String(parseInt(t, 10) || 0));
+    // YouTube only loops a single video when `playlist` repeats its own id.
+    if (loopEnabled) { params.set("loop", "1"); params.set("playlist", id); }
     return `https://www.youtube.com/embed/${id}?${params.toString()}`;
   }
 
   function fileName(path) {
-    try { return decodeURIComponent(path.split("/").pop()) || "vídeo"; }
-    catch (e) { return "vídeo"; }
+    try { return decodeURIComponent(path.split("/").pop()) || "video"; }
+    catch (e) { return "video"; }
   }
 
-  /* ---------- Criação de players ---------- */
+  /* ---------- Player creation ---------- */
 
-  function addPlayer(raw) {
-    const src = parseSource(raw);
+  function addPlayer(raw, quality, presetSrc) {
+    const src = presetSrc || parseSource(raw);
     if (!src) return;
-    if (src.type === "invalid") { alert("URL inválida: " + raw); return; }
+    if (src.type === "invalid") { toast("Invalid URL: " + raw); return; }
 
     const id = nextId++;
     const cell = document.createElement("div");
     cell.className = "cell";
     cell.dataset.id = id;
+    cell.style.order = id; // shuffle reorders via CSS order — no reload
+
+    // Per-video quality only makes a difference for server-resolved (yt-dlp)
+    // streams. Iframes (YouTube/Twitch/Vimeo) and direct file/HLS links don't
+    // renegotiate quality here, so we don't clutter their bar with a control.
+    const canPickQuality = src.type === "resolve";
+    const rec = {
+      id, cell, bar: null, raw, url: src.url, type: src.type,
+      quality: canPickQuality && quality != null ? String(quality) : "",
+      media: null, _presetSrc: presetSrc || null,
+    };
 
     const bar = document.createElement("div");
     bar.className = "cell-bar";
+    let qselHtml = "";
+    if (canPickQuality) {
+      qselHtml = '<select class="qsel" title="Resolution for this video">' +
+        QUALITY_OPTIONS.map(o =>
+          '<option value="' + o.value + '"' +
+          (o.value === rec.quality ? " selected" : "") + '>' +
+          escapeHtml(o.label) + '</option>'
+        ).join("") +
+        '</select>';
+    }
     bar.innerHTML =
       '<span class="title">' + escapeHtml(src.title || src.url) + '</span>' +
       '<span class="btns">' +
-        '<button class="reload" title="Recarregar este vídeo">↻</button>' +
-        '<button class="fs" title="Tela cheia">⛶</button>' +
-        '<button class="close" title="Fechar">✕</button>' +
+        qselHtml +
+        '<button class="reload" title="Reload this video">↻</button>' +
+        '<button class="fs" title="Fullscreen">⛶</button>' +
+        '<button class="close" title="Close">✕</button>' +
       '</span>';
     bar.querySelector(".close").addEventListener("click", () => removePlayer(id));
     bar.querySelector(".reload").addEventListener("click", () => reloadPlayer(id));
     bar.querySelector(".fs").addEventListener("click", () => {
       if (cell.requestFullscreen) cell.requestFullscreen();
     });
+    const qsel = bar.querySelector(".qsel");
+    if (qsel) qsel.addEventListener("change", () => setPlayerQuality(id, qsel.value));
     cell.appendChild(bar);
+
+    // Floating "record clip" button — only for direct video players (they
+    // expose currentTime). Iframes (YouTube/Twitch/Vimeo) can't be read, so
+    // those still use the manual start/end fields in the Compile modal.
+    if (src.type !== "iframe") {
+      const recBtn = document.createElement("button");
+      recBtn.type = "button";
+      recBtn.className = "rec-btn";
+      recBtn.textContent = "REC";
+      recBtn.title = "Record a clip and add it to the compilation";
+      recBtn.addEventListener("click", () => toggleRecord(rec));
+      cell.appendChild(recBtn);
+      cell.classList.add("has-rec");
+      rec.recBtn = recBtn;
+    }
+
     grid.appendChild(cell);
 
-    const rec = { id, cell, bar, raw, url: src.url, media: null };
+    rec.bar = bar;
     players.push(rec);
     updateLayout();
     mountMedia(rec, src);
   }
 
-  // Monta a mídia (iframe / vídeo / resolve) dentro da célula do player.
+  // Add a video file from the user's computer. It's uploaded to the local
+  // server (which serves it with Range support), so it plays/seeks and can be
+  // recorded & compiled exactly like any URL. Shows upload progress in a
+  // placeholder tile while it transfers.
+  function addLocalFile(file) {
+    if (!file) return;
+    if (!/^video\//.test(file.type) && !/\.(mp4|webm|mkv|mov|m4v|ogv|ogg|avi)$/i.test(file.name)) {
+      toast("“" + file.name + "” doesn’t look like a video file."); return;
+    }
+    const cell = document.createElement("div");
+    cell.className = "cell";
+    const ph = document.createElement("div");
+    ph.className = "empty";
+    ph.innerHTML = '<strong>Uploading…</strong><small>' + escapeHtml(file.name) +
+      ' <span class="up-pct">0%</span></small>';
+    cell.appendChild(ph);
+    grid.appendChild(cell);
+    emptyState.style.display = "none";
+
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/upload?name=" + encodeURIComponent(file.name));
+    xhr.upload.onprogress = (e) => {
+      if (!e.lengthComputable) return;
+      const pct = Math.round(e.loaded / e.total * 100);
+      const el = ph.querySelector(".up-pct");
+      if (el) el.textContent = pct + "%";
+    };
+    xhr.onload = () => {
+      cell.remove();
+      let data = null;
+      try { data = JSON.parse(xhr.responseText); } catch (e) {}
+      if (xhr.status >= 200 && xhr.status < 300 && data && data.ok) {
+        const url = location.origin + data.url;
+        addPlayer(url, null, { type: "file", url, title: data.name || file.name });
+      } else {
+        toast("Upload failed: " + ((data && data.error) || ("HTTP " + xhr.status)));
+        updateLayout();
+      }
+    };
+    xhr.onerror = () => { cell.remove(); toast("Upload failed (network error)."); updateLayout(); };
+    xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+    xhr.send(file);
+  }
+
+  // Effective quality (px cap) for a resolve request: the per-video override
+  // if set, otherwise whatever the global toolbar selector says.
+  function effectiveQuality(rec) {
+    return rec.quality !== "" && rec.quality != null
+      ? rec.quality : qualitySelect.value;
+  }
+
+  // Change a single video's quality and re-resolve it in place.
+  function setPlayerQuality(id, value) {
+    const rec = players.find(p => p.id === id);
+    if (!rec || rec.type !== "resolve") return;
+    rec.quality = value;
+    reloadPlayer(id);
+  }
+
+  // Mounts the media (iframe / video / resolve) inside the player cell.
   function mountMedia(rec, src) {
     if (src.type === "iframe") {
       const iframe = document.createElement("iframe");
@@ -444,36 +869,53 @@
       rec.cell.insertBefore(iframe, rec.bar);
       rec.media = iframe;
     } else if (src.type === "resolve") {
-      resolveAndPlay(rec, src);
+      queueResolve(rec, src);
     } else {
       rec.media = makeVideo(rec, src.type === "hls", src.url);
       rec.cell.insertBefore(rec.media, rec.bar);
     }
   }
 
-  // Recria só este player, no mesmo lugar (útil quando trava no meio).
+  // Recreates just this player, in place (useful when it stalls mid-stream).
   function reloadPlayer(id) {
     const rec = players.find(p => p.id === id);
     if (!rec) return;
+    cancelRecord(rec); // a reload swaps the <video>, so drop any in-progress take
     if (rec.media && rec.media._hls) rec.media._hls.destroy();
     if (rec.media) rec.media.remove();
     rec.media = null;
     rec.cell.querySelectorAll(".empty").forEach(el => el.remove());
-    const src = parseSource(rec.raw);
+    const src = rec._presetSrc || parseSource(rec.raw);
     if (!src || src.type === "invalid") return;
     mountMedia(rec, src);
   }
 
-  // Cria um <video> (com hls.js quando necessário) já ligado ao stream.
+  // Creates a <video> (with hls.js when needed) already wired to the stream.
   function makeVideo(rec, useHls, url) {
     const video = document.createElement("video");
     video.controls = true;
     video.autoplay = true;
     video.muted = allMuted;
+    video.loop = loopEnabled;
     video.playsInline = true;
     if (useHls && window.Hls && !video.canPlayType("application/vnd.apple.mpegurl")) {
       if (Hls.isSupported()) {
-        const hls = new Hls();
+        const hls = new Hls({
+          // Each tile is small in an N-video grid: pick the lowest rendition
+          // that still covers the player's real size. Avoids pulling 1080p
+          // into a tiny tile.
+          capLevelToPlayerSize: true,
+          capLevelOnFPSDrop: true, // step down if decoding can't keep up
+          startLevel: 0,           // start at the lowest rendition
+          testBandwidth: false,    // skip the probe download (startLevel 0 already)
+          lowLatencyMode: false,   // LL-HLS part-loading burns CPU across N tiles
+          // Lean buffers: with many players at once, 30s each is a lot of
+          // memory/CPU. 10s gives headroom without drowning the machine.
+          maxBufferLength: 10,
+          maxMaxBufferLength: 20,
+          backBufferLength: 10,
+          maxBufferSize: 20 * 1000 * 1000, // ~20 MB per player instead of 60
+        });
         hls.loadSource(url);
         hls.attachMedia(video);
         video._hls = hls;
@@ -488,19 +930,47 @@
     return video;
   }
 
-  // Pede ao back-end (yt-dlp) o stream real e então cria o player.
+  /* ---------- Server resolve (yt-dlp), throttled ---------- */
+
+  // Adding 12 links at once would fire 12 yt-dlp extractions simultaneously
+  // and everything crawls. A small queue keeps the first tiles playing fast.
+  const MAX_CONCURRENT_RESOLVES = 4;
+  let activeResolves = 0;
+  const resolveWaiting = [];
+
+  function queueResolve(rec, src) {
+    resolveWaiting.push({ rec, src });
+    pumpResolves();
+  }
+
+  function pumpResolves() {
+    while (activeResolves < MAX_CONCURRENT_RESOLVES && resolveWaiting.length) {
+      const job = resolveWaiting.shift();
+      // Skip players removed while waiting in the queue.
+      if (!players.includes(job.rec)) continue;
+      activeResolves++;
+      resolveAndPlay(job.rec, job.src).finally(() => {
+        activeResolves--;
+        pumpResolves();
+      });
+    }
+  }
+
+  // Asks the back-end (yt-dlp) for the real stream, then builds the player.
   function resolveAndPlay(rec, src) {
     const loading = document.createElement("div");
     loading.className = "empty";
-    loading.innerHTML = '<strong>Resolvendo via servidor…</strong>' +
-      '<small>Procurando o stream de <code>' + escapeHtml(src.title || src.url) +
-      '</code> com o yt-dlp.</small>';
+    loading.innerHTML = '<strong>Resolving via server…</strong>' +
+      '<small>Looking up the stream for <code>' + escapeHtml(src.title || src.url) +
+      '</code> with yt-dlp.</small>';
     rec.cell.insertBefore(loading, rec.cell.firstChild);
 
-    fetch("/api/resolve?url=" + encodeURIComponent(src.url))
+    return fetch("/api/resolve?url=" + encodeURIComponent(src.url) +
+          "&q=" + encodeURIComponent(effectiveQuality(rec)))
       .then(r => r.json())
       .then(data => {
         loading.remove();
+        if (!players.includes(rec)) return; // removed while resolving
         if (!data.ok) { showError(rec.cell, src.url, data.error); return; }
         const titleEl = rec.cell.querySelector(".cell-bar .title");
         if (titleEl && data.title) titleEl.textContent = data.title;
@@ -510,7 +980,7 @@
       .catch(() => {
         loading.remove();
         showError(rec.cell, src.url,
-          "Servidor indisponível. Rode 'python server.py' e acesse por http://localhost:8000");
+          "Server unavailable. Run 'python server.py' and open http://localhost:8000");
       });
   }
 
@@ -518,11 +988,11 @@
     if (cell.querySelector(".error")) return;
     const err = document.createElement("div");
     err.className = "empty error";
-    err.innerHTML = '<strong>Não deu pra carregar 😕</strong><small>' +
+    err.innerHTML = '<strong>Couldn’t load this one 😕</strong><small>' +
       (detail
         ? escapeHtml(detail)
-        : "O servidor do vídeo pode bloquear reprodução externa (CORS/hotlink), " +
-          "exigir DRM, ou o link expirou.") +
+        : "The video server may block external playback (CORS/hotlinking), " +
+          "require DRM, or the link expired.") +
       '<br><code>' + escapeHtml(url) + '</code></small>';
     cell.appendChild(err);
   }
@@ -531,6 +1001,7 @@
     const idx = players.findIndex(p => p.id === id);
     if (idx === -1) return;
     const p = players[idx];
+    cancelRecord(p);
     if (p.media && p.media._hls) p.media._hls.destroy();
     p.cell.remove();
     players.splice(idx, 1);
@@ -553,7 +1024,19 @@
     grid.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
   }
 
-  /* ---------- Utilidades ---------- */
+  // Shuffle by randomizing CSS order — cells never leave the DOM, so
+  // iframes (YouTube/Twitch) and <video> streams keep playing untouched.
+  function shufflePlayers() {
+    if (players.length < 2) return;
+    const slots = players.map((_, i) => i);
+    for (let i = slots.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [slots[i], slots[j]] = [slots[j], slots[i]];
+    }
+    players.forEach((p, i) => { p.cell.style.order = slots[i]; });
+  }
+
+  /* ---------- Utilities ---------- */
 
   function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, c => (
@@ -561,13 +1044,13 @@
     ));
   }
 
-  /* ---------- Eventos ---------- */
+  /* ---------- Events ---------- */
 
   urlForm.addEventListener("submit", (e) => {
     e.preventDefault();
     const val = urlInput.value.trim();
     if (!val) return;
-    // Permite colar várias URLs separadas por espaço ou quebra de linha
+    // Allows pasting several URLs separated by spaces or line breaks
     val.split(/[\s\n]+/).filter(Boolean).forEach(addPlayer);
     urlInput.value = "";
     urlInput.focus();
@@ -575,11 +1058,50 @@
 
   layoutSelect.addEventListener("change", updateLayout);
 
+  // Changing the global Quality re-resolves every server-backed player live.
+  // It also clears per-video overrides so "all tabs" really follow the new
+  // choice. iframes (YouTube/Twitch/Vimeo) and direct file/HLS links keep
+  // their own quality handling and are left untouched.
+  qualitySelect.addEventListener("change", () => {
+    const resolvable = players.filter(p => p.type === "resolve");
+    if (!resolvable.length) {
+      toast("Quality applies to server-resolved videos (yt-dlp). YouTube/Twitch/Vimeo and direct files keep their own quality.", 4200);
+      return;
+    }
+    resolvable.forEach(p => {
+      p.quality = ""; // back to following the global selector
+      const qsel = p.bar && p.bar.querySelector(".qsel");
+      if (qsel) qsel.value = "";
+      reloadPlayer(p.id);
+    });
+    toast("Reloading " + resolvable.length + " video(s) at " +
+      (qualitySelect.value === "0" ? "source" : qualitySelect.value + "p") + "…", 3000);
+  });
+
+  // Loop toggle: <video> players flip instantly; YouTube/Vimeo iframes need
+  // the loop parameter baked into their URL, so only those are reloaded.
+  loopToggle.addEventListener("change", () => {
+    loopEnabled = loopToggle.checked;
+    players.forEach(p => {
+      if (!p.media) return;
+      if (p.media.tagName === "VIDEO") {
+        p.media.loop = loopEnabled;
+      } else if (p.media.tagName === "IFRAME" &&
+                 /youtube\.com\/embed|player\.vimeo\.com/.test(p.media.src || "")) {
+        reloadPlayer(p.id);
+      }
+    });
+  });
+
+  shuffleBtn.addEventListener("click", shufflePlayers);
+
   muteAllBtn.addEventListener("click", () => {
     allMuted = !allMuted;
-    players.forEach(p => { if (p.media.tagName === "VIDEO") p.media.muted = allMuted; });
-    muteAllBtn.textContent = allMuted ? "🔇 Mudo" : "🔊 Som";
-    if (!allMuted) alert("Obs.: só players de arquivo direto (mp4/hls) respondem ao mudo global. YouTube/Vimeo/Twitch têm controle próprio dentro do player.");
+    players.forEach(p => {
+      if (p.media && p.media.tagName === "VIDEO") p.media.muted = allMuted;
+    });
+    muteAllBtn.textContent = allMuted ? "🔇 Muted" : "🔊 Sound";
+    if (!allMuted) toast("Note: only direct players (mp4/HLS) follow global mute. YouTube/Vimeo/Twitch have their own volume control.", 4200);
   });
 
   fsAllBtn.addEventListener("click", () => {
@@ -594,126 +1116,161 @@
 
   document.addEventListener("fullscreenchange", () => {
     const on = document.fullscreenElement === grid;
-    fsAllBtn.textContent = on ? "🡼 Sair" : "⛶ Tela cheia";
+    fsAllBtn.textContent = on ? "🡼 Exit" : "⛶ Fullscreen";
   });
 
-  // Lê/grava a coleção de multiscreens salvos (objeto: nome -> {layout, urls, ts}).
-  function readStore() {
-    let store = {};
-    try { store = JSON.parse(localStorage.getItem(STORE_KEY)) || {}; } catch (e) { store = {}; }
-    // Migração: se existir a grade única antiga, traz como "Configuração anterior".
-    const legacy = localStorage.getItem(STORAGE_KEY);
-    if (legacy && !store.__migrated) {
-      try {
-        const d = JSON.parse(legacy);
-        if (d && d.urls && d.urls.length && !store["Configuração anterior"]) {
-          store["Configuração anterior"] = { layout: d.layout || "auto", urls: d.urls, ts: Date.now() };
-        }
-      } catch (e) {}
-      store.__migrated = true;
-      localStorage.removeItem(STORAGE_KEY);
-      writeStore(store);
-    }
-    return store;
-  }
-  function writeStore(store) {
-    localStorage.setItem(STORE_KEY, JSON.stringify(store));
-  }
-  function savedNames(store) {
-    return Object.keys(store).filter(k => k !== "__migrated");
-  }
-
   function openSaveModal() {
-    if (!players.length) { alert("Adicione pelo menos um vídeo antes de salvar."); return; }
+    if (!players.length) { toast("Add at least one video before saving."); return; }
     saveName.value = "";
     saveModal.classList.add("open");
     saveName.focus();
   }
   function closeSaveModal() { saveModal.classList.remove("open"); }
 
+  function sanitizeFileName(name) {
+    return name.replace(/[\\/:*?"<>|]+/g, "_").replace(/\s+/g, " ").trim() || "multiscreen";
+  }
+
+  // Save = generate and download a .multiscreen.json file with this session.
   function doSave() {
     const name = saveName.value.trim();
     if (!name) { saveName.focus(); return; }
-    const store = readStore();
-    if (savedNames(store).includes(name) &&
-        !confirm(`Já existe um MultiScreen chamado "${name}". Sobrescrever?`)) {
-      return;
-    }
-    store[name] = { layout: layoutSelect.value, urls: players.map(p => p.raw), ts: Date.now() };
-    writeStore(store);
+    const config = {
+      app: "multiscreen",
+      version: 1,
+      name,
+      layout: layoutSelect.value,
+      quality: qualitySelect.value,
+      loop: loopEnabled,
+      // `items` keeps each video's per-tile quality override; `urls` is kept
+      // alongside it so files stay readable by older versions of the app.
+      items: players.map(p => ({ url: p.raw, quality: p.quality || "" })),
+      urls: players.map(p => p.raw),
+      ts: Date.now(),
+    };
+    const blob = new Blob([JSON.stringify(config, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = sanitizeFileName(name) + ".multiscreen.json";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
     closeSaveModal();
     const original = saveBtn.textContent;
-    saveBtn.textContent = "✓ Salvo";
+    saveBtn.textContent = "✓ Saved";
     setTimeout(() => { saveBtn.textContent = original; }, 1200);
   }
 
+  // Normalizes a config into a list of { url, quality } items, accepting both
+  // the newer `items` array and the older `urls`-only format.
+  function configItems(cfg) {
+    if (cfg && Array.isArray(cfg.items)) {
+      return cfg.items
+        .map(it => (typeof it === "string"
+          ? { url: it, quality: "" }
+          : { url: it && it.url, quality: (it && it.quality) || "" }))
+        .filter(it => it.url);
+    }
+    if (cfg && Array.isArray(cfg.urls)) {
+      return cfg.urls.filter(Boolean).map(u => ({ url: u, quality: "" }));
+    }
+    return [];
+  }
+
   function applyConfig(cfg) {
-    const urls = (cfg && cfg.urls) || [];
-    if (!urls.length) { alert("Essa configuração está vazia."); return; }
+    const items = configItems(cfg);
+    if (!items.length) { toast("This configuration is empty."); return; }
     [...players].forEach(p => removePlayer(p.id));
     if (cfg.layout) layoutSelect.value = cfg.layout;
+    if (cfg.quality != null && cfg.quality !== "") qualitySelect.value = String(cfg.quality);
+    if (typeof cfg.loop === "boolean") { loopEnabled = cfg.loop; loopToggle.checked = cfg.loop; }
     updateLayout();
-    urls.forEach(u => addPlayer(u));
+    items.forEach(it => addPlayer(it.url, it.quality));
   }
 
-  function openLoadModal() {
-    loadSearch.value = "";
-    renderSavedList("");
-    loadModal.classList.add("open");
-    loadSearch.focus();
+  // Load = import a previously saved .json file.
+  function loadFromFile(file) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      let cfg;
+      try { cfg = JSON.parse(reader.result); }
+      catch (e) { toast("Invalid file: not valid JSON."); return; }
+      if (!cfg || (!Array.isArray(cfg.urls) && !Array.isArray(cfg.items))) {
+        toast("Invalid file: doesn't look like a saved MultiScreen.");
+        return;
+      }
+      applyConfig(cfg);
+    };
+    reader.onerror = () => toast("Couldn't read the file.");
+    reader.readAsText(file);
   }
-  function closeLoadModal() { loadModal.classList.remove("open"); }
 
-  function renderSavedList(filter) {
-    const store = readStore();
-    const q = (filter || "").trim().toLowerCase();
-    const names = savedNames(store)
-      .filter(n => n.toLowerCase().includes(q))
-      .sort((a, b) => (store[b].ts || 0) - (store[a].ts || 0));
+  // Merge = pick several saved .json files and combine their videos into one
+  // new file (downloaded). Duplicate URLs are dropped, keeping first-seen
+  // order. Layout/quality come from the first file that declares them.
+  function mergeFiles(fileList) {
+    const files = Array.from(fileList || []);
+    if (files.length < 2) { toast("Pick at least two .json files to merge."); return; }
 
-    savedList.innerHTML = "";
-    if (!names.length) {
-      const empty = document.createElement("div");
-      empty.className = "saved-empty";
-      empty.textContent = savedNames(store).length
-        ? "Nenhum resultado para essa busca."
-        : "Nenhum MultiScreen salvo ainda.";
-      savedList.appendChild(empty);
-      return;
-    }
+    Promise.all(files.map(readFileText)).then(texts => {
+      const merged = [];
+      const seen = new Set();
+      let layout = "", quality = "", loop = null, parsed = 0;
 
-    names.forEach(name => {
-      const cfg = store[name];
-      const item = document.createElement("div");
-      item.className = "saved-item";
-
-      const info = document.createElement("div");
-      info.className = "info";
-      const count = (cfg.urls || []).length;
-      const when = cfg.ts ? new Date(cfg.ts).toLocaleString() : "";
-      info.innerHTML =
-        '<div class="name">' + escapeHtml(name) + '</div>' +
-        '<div class="meta">' + count + (count === 1 ? ' player' : ' players') +
-        (when ? ' • ' + escapeHtml(when) : '') + '</div>';
-      info.addEventListener("click", () => { applyConfig(cfg); closeLoadModal(); });
-
-      const del = document.createElement("button");
-      del.className = "del";
-      del.textContent = "🗑";
-      del.title = "Excluir";
-      del.addEventListener("click", (e) => {
-        e.stopPropagation();
-        if (confirm(`Excluir o MultiScreen "${name}"?`)) {
-          const s = readStore();
-          delete s[name];
-          writeStore(s);
-          renderSavedList(loadSearch.value);
-        }
+      texts.forEach(text => {
+        let cfg;
+        try { cfg = JSON.parse(text); } catch (e) { return; }
+        const items = configItems(cfg);
+        if (!items.length) return;
+        parsed++;
+        if (!layout && cfg.layout) layout = cfg.layout;
+        if (!quality && cfg.quality != null && cfg.quality !== "") quality = String(cfg.quality);
+        if (loop === null && typeof cfg.loop === "boolean") loop = cfg.loop;
+        items.forEach(it => {
+          const key = it.url.trim();
+          if (!key || seen.has(key)) return;
+          seen.add(key);
+          merged.push({ url: it.url, quality: it.quality || "" });
+        });
       });
 
-      item.appendChild(info);
-      item.appendChild(del);
-      savedList.appendChild(item);
+      if (!parsed) { toast("None of the selected files were valid MultiScreens."); return; }
+      if (!merged.length) { toast("Nothing to merge — the files had no videos."); return; }
+
+      const name = (prompt("Name for the merged MultiScreen:", "Merged") || "").trim();
+      if (!name) return;
+
+      const config = {
+        app: "multiscreen",
+        version: 1,
+        name,
+        layout: layout || "auto",
+        quality: quality || qualitySelect.value,
+        loop: loop === null ? loopEnabled : loop,
+        items: merged,
+        urls: merged.map(it => it.url),
+        ts: Date.now(),
+      };
+      const blob = new Blob([JSON.stringify(config, null, 2)], { type: "application/json" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = sanitizeFileName(name) + ".multiscreen.json";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      toast("Merged " + parsed + " files → " + merged.length + " videos. Use 📂 Load to open it.", 4200);
+    }).catch(() => toast("Couldn't read one of the files."));
+  }
+
+  function readFileText(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsText(file);
     });
   }
 
@@ -723,21 +1280,360 @@
   saveForm.addEventListener("submit", (e) => { e.preventDefault(); doSave(); });
   saveModal.addEventListener("click", (e) => { if (e.target === saveModal) closeSaveModal(); });
 
-  loadBtn.addEventListener("click", openLoadModal);
-  loadCancel.addEventListener("click", closeLoadModal);
-  loadSearch.addEventListener("input", () => renderSavedList(loadSearch.value));
-  loadModal.addEventListener("click", (e) => { if (e.target === loadModal) closeLoadModal(); });
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") { closeSaveModal(); closeLoadModal(); }
+  localBtn.addEventListener("click", () => localFileInput.click());
+  localFileInput.addEventListener("change", () => {
+    Array.from(localFileInput.files || []).forEach(addLocalFile);
+    localFileInput.value = ""; // allow re-picking the same file later
   });
 
+  loadBtn.addEventListener("click", () => loadFileInput.click());
+  loadFileInput.addEventListener("change", () => {
+    loadFromFile(loadFileInput.files && loadFileInput.files[0]);
+    loadFileInput.value = "";  // allows loading the same file again later
+  });
+
+  mergeBtn.addEventListener("click", () => mergeFileInput.click());
+  mergeFileInput.addEventListener("change", () => {
+    mergeFiles(mergeFileInput.files);
+    mergeFileInput.value = "";  // allows re-selecting the same files later
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { closeSaveModal(); closeCompileModal(); }
+  });
+
+  /* ---------- Compilation ---------- */
+
+  // Ordered list of cuts to compile: { url (original), title, start, end }.
+  const compileCuts = [];
+  let compiling = false;
+
+  function playerLabel(p) {
+    const titleEl = p.bar && p.bar.querySelector(".title");
+    const t = (titleEl && titleEl.textContent.trim()) || p.url;
+    return "#" + p.id + " · " + t;
+  }
+
+  // Rebuilds the video combobox from the current players, keeping the previous
+  // selection when possible.
+  function refreshCutVideoOptions() {
+    const prev = cutVideo.value;
+    cutVideo.innerHTML = players.map(p =>
+      '<option value="' + p.id + '">' + escapeHtml(playerLabel(p)) + '</option>'
+    ).join("");
+    if (players.some(p => String(p.id) === prev)) cutVideo.value = prev;
+  }
+
+  // ---- Time helpers (minutes:seconds) ----
+
+  // Seconds -> "mm:ss" (or "h:mm:ss" past an hour).
+  function secToTime(s) {
+    s = Math.max(0, Math.round(s || 0));
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = s % 60;
+    const pad = n => (n < 10 ? "0" + n : "" + n);
+    return h > 0 ? (h + ":" + pad(m) + ":" + pad(sec)) : (pad(m) + ":" + pad(sec));
+  }
+
+  // "mm:ss" / "h:mm:ss" / bare seconds -> total seconds (NaN if empty/invalid).
+  function timeToSec(str) {
+    str = String(str == null ? "" : str).trim();
+    if (str === "") return NaN;
+    const parts = str.split(":");
+    if (parts.length === 1) return parseFloat(parts[0]);   // bare number = seconds
+    let total = 0;
+    for (const p of parts) {
+      const n = parseInt(p, 10);
+      total = total * 60 + (isFinite(n) ? n : 0);
+    }
+    return total;
+  }
+
+  // Live input mask: keep digits, format the last two as seconds. Typing
+  // "130" shows "1:30", "0245" -> "02:45", "10000" -> "1:00:00".
+  function maskTime(raw) {
+    const d = String(raw).replace(/\D/g, "").slice(0, 6);
+    if (!d) return "";
+    if (d.length <= 2) return d;
+    if (d.length <= 4) return d.slice(0, -2) + ":" + d.slice(-2);
+    return d.slice(0, -4) + ":" + d.slice(-4, -2) + ":" + d.slice(-2);
+  }
+
+  // Normalize a time field to a clean mm:ss on blur.
+  function normalizeTimeField(input) {
+    const s = timeToSec(input.value);
+    input.value = isFinite(s) ? secToTime(s) : "";
+  }
+
+  function renderCutList() {
+    cutListEl.innerHTML = compileCuts.map((c, i) =>
+      '<li class="cut-item" data-i="' + i + '">' +
+        '<span class="idx">' + (i + 1) + '</span>' +
+        '<span class="cut-info">' +
+          '<div class="cut-title">' + escapeHtml(c.title) + '</div>' +
+          '<div class="cut-range">' + secToTime(c.start) + ' → ' + secToTime(c.end) +
+            '  ·  ' + secToTime(c.end - c.start) + '</div>' +
+        '</span>' +
+        '<span class="cut-btns">' +
+          '<button type="button" class="up" title="Move up"' + (i === 0 ? ' disabled' : '') + '>▲</button>' +
+          '<button type="button" class="down" title="Move down"' + (i === compileCuts.length - 1 ? ' disabled' : '') + '>▼</button>' +
+          '<button type="button" class="del" title="Remove">✕</button>' +
+        '</span>' +
+      '</li>'
+    ).join("");
+    const total = compileCuts.reduce((a, c) => a + (c.end - c.start), 0);
+    cutTotal.textContent = compileCuts.length + " cut" + (compileCuts.length === 1 ? "" : "s") +
+      " · " + secToTime(total) + " total";
+  }
+
+  cutListEl.addEventListener("click", (e) => {
+    const btn = e.target.closest("button");
+    if (!btn) return;
+    const li = e.target.closest(".cut-item");
+    const i = parseInt(li.dataset.i, 10);
+    if (btn.classList.contains("del")) {
+      compileCuts.splice(i, 1);
+    } else if (btn.classList.contains("up") && i > 0) {
+      [compileCuts[i - 1], compileCuts[i]] = [compileCuts[i], compileCuts[i - 1]];
+    } else if (btn.classList.contains("down") && i < compileCuts.length - 1) {
+      [compileCuts[i + 1], compileCuts[i]] = [compileCuts[i], compileCuts[i + 1]];
+    }
+    renderCutList();
+  });
+
+  // Reads the current playback time of the selected player's <video>, if any.
+  function selectedPlayerTime() {
+    const p = players.find(pl => String(pl.id) === cutVideo.value);
+    if (p && p.media && p.media.tagName === "VIDEO" && isFinite(p.media.currentTime)) {
+      return p.media.currentTime;
+    }
+    return null;
+  }
+
+  // Apply the mm:ss mask as the user types, and tidy up on blur.
+  [cutStart, cutEnd].forEach(inp => {
+    inp.addEventListener("input", () => { inp.value = maskTime(inp.value); });
+    inp.addEventListener("blur", () => normalizeTimeField(inp));
+  });
+
+  grabStart.addEventListener("click", () => {
+    const t = selectedPlayerTime();
+    if (t == null) { toast("Current time is only available for mp4/HLS players (not YouTube/Twitch iframes)."); return; }
+    cutStart.value = secToTime(t);
+  });
+  grabEnd.addEventListener("click", () => {
+    const t = selectedPlayerTime();
+    if (t == null) { toast("Current time is only available for mp4/HLS players (not YouTube/Twitch iframes)."); return; }
+    cutEnd.value = secToTime(t);
+  });
+
+  addCutBtn.addEventListener("click", () => {
+    const p = players.find(pl => String(pl.id) === cutVideo.value);
+    if (!p) { toast("Add a video first, then pick it here."); return; }
+    const start = timeToSec(cutStart.value);
+    const end = timeToSec(cutEnd.value);
+    if (!isFinite(start) || !isFinite(end) || end <= start) {
+      toast("End must be greater than start."); return;
+    }
+    const titleEl = p.bar && p.bar.querySelector(".title");
+    compileCuts.push({
+      url: p.raw,
+      title: (titleEl && titleEl.textContent.trim()) || p.url,
+      start, end,
+    });
+    renderCutList();
+    // Chain the next cut from where this one ended — handy for sequential clips.
+    cutStart.value = secToTime(end);
+    cutEnd.value = secToTime(end + (end - start));
+  });
+
+  /* ---------- Per-video quick record ---------- */
+
+  // Click the floating REC button to mark the start (at the video's current
+  // time), click again to stop — the [start,end] span is added to the
+  // compilation automatically. Works only on direct <video> players.
+  function toggleRecord(rec) {
+    const video = rec.media;
+    if (!video || video.tagName !== "VIDEO") {
+      toast("Recording works on direct video players (mp4/HLS/resolved). For YouTube/Twitch, use the manual start/end in 🎬 Compile.", 4200);
+      return;
+    }
+    if (rec._recording) { stopRecord(rec, true); return; }
+    rec._recording = true;
+    rec._recStart = video.currentTime || 0;
+    if (rec.recBtn) rec.recBtn.classList.add("recording");
+    updateRecLabel(rec);
+    rec._recTimer = setInterval(() => updateRecLabel(rec), 250);
+    toast("Recording… click REC again to stop and add the clip.", 2600);
+  }
+
+  function updateRecLabel(rec) {
+    if (!rec.recBtn) return;
+    const video = rec.media;
+    const elapsed = video ? Math.max(0, (video.currentTime || 0) - rec._recStart) : 0;
+    rec.recBtn.textContent = "STOP " + secToTime(elapsed);
+  }
+
+  // Stop recording. commit=true adds the captured span to the compilation.
+  function stopRecord(rec, commit) {
+    if (!rec._recording) return;
+    clearInterval(rec._recTimer);
+    rec._recTimer = null;
+    rec._recording = false;
+    if (rec.recBtn) {
+      rec.recBtn.classList.remove("recording");
+      rec.recBtn.textContent = "REC";
+    }
+    if (!commit) return;
+    const video = rec.media;
+    if (!video) return;
+    const start = rec._recStart || 0;
+    const end = video.currentTime || 0;
+    if (end - start < 0.3) {
+      toast("Clip too short (or the video looped/seeked). Try again.", 3200);
+      return;
+    }
+    const titleEl = rec.bar && rec.bar.querySelector(".title");
+    compileCuts.push({
+      url: rec.raw,
+      title: (titleEl && titleEl.textContent.trim()) || rec.url,
+      start, end,
+    });
+    if (compileModal.classList.contains("open")) renderCutList();
+    toast("Clip " + secToTime(start) + "–" + secToTime(end) +
+      " added to compilation (" + compileCuts.length + " total). Open 🎬 Compile to export.", 3600);
+  }
+
+  // Drop an in-progress take without committing (used on reload/remove).
+  function cancelRecord(rec) {
+    if (rec && rec._recording) stopRecord(rec, false);
+  }
+
+  function openCompileModal() {
+    if (!players.length) { toast("Add at least one video before compiling."); return; }
+    refreshCutVideoOptions();
+    renderCutList();
+    setCompiling(false);
+    compileModal.classList.add("open");
+  }
+  function closeCompileModal() {
+    if (compiling) return; // don't let a generate get orphaned
+    compileModal.classList.remove("open");
+  }
+
+  function setCompiling(on) {
+    compiling = on;
+    compileProgress.classList.toggle("show", on);
+    compileGo.disabled = on;
+    addCutBtn.disabled = on;
+    compileGo.textContent = on ? "Generating…" : "🎬 Generate .mp4";
+    if (!on) setProgress(0, false);
+  }
+
+  // Drive the progress bar. pct 0..100; indeterminate=true for the concat step.
+  function setProgress(pct, indeterminate) {
+    progressFill.classList.toggle("indeterminate", !!indeterminate);
+    if (!indeterminate) progressFill.style.width = Math.max(0, Math.min(100, pct)) + "%";
+  }
+
+  // Async compile: start a job, poll its progress, then download the result.
+  function doCompile() {
+    if (compiling) return;
+    if (!compileCuts.length) { toast("Add at least one cut first."); return; }
+
+    setCompiling(true);
+    setProgress(2, false);
+    compileStatus.textContent = "Starting…";
+
+    const payload = {
+      resolution: compileRes.value,
+      cuts: compileCuts.map(c => ({ url: c.url, start: c.start, end: c.end })),
+    };
+
+    fetch("/api/compile", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok) throw new Error(data.error || "could not start compilation");
+        pollCompile(data.job_id, data.total);
+      })
+      .catch(err => {
+        toast("Compilation failed: " + (err.message || err), 5000);
+        setCompiling(false);
+      });
+  }
+
+  function pollCompile(jobId, total) {
+    const poll = () => {
+      fetch("/api/compile/status?id=" + encodeURIComponent(jobId))
+        .then(r => r.json())
+        .then(s => {
+          if (!s.ok) throw new Error(s.error || "lost track of the job");
+          if (s.stage === "error") throw new Error(s.error || "compilation error");
+
+          if (s.stage === "extracting" || s.stage === "queued") {
+            const done = s.done || 0;
+            const pct = total ? Math.round(done / total * 90) : 5;
+            setProgress(Math.max(4, pct), false);
+            compileStatus.textContent = "Cutting clips… " + done + " / " + total;
+          } else if (s.stage === "concatenating") {
+            setProgress(95, true);
+            compileStatus.textContent = "Joining clips…";
+          }
+
+          if (s.ready) {
+            setProgress(100, false);
+            compileStatus.textContent = "Downloading…";
+            downloadCompileResult(jobId, s.skipped || 0);
+            return;
+          }
+          setTimeout(poll, 500);
+        })
+        .catch(err => {
+          toast("Compilation failed: " + (err.message || err), 5000);
+          setCompiling(false);
+        });
+    };
+    poll();
+  }
+
+  function downloadCompileResult(jobId, skipped) {
+    fetch("/api/compile/result?id=" + encodeURIComponent(jobId))
+      .then(resp => {
+        if (!resp.ok) throw new Error("result not available (HTTP " + resp.status + ")");
+        return resp.blob();
+      })
+      .then(blob => {
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = "compilation.mp4";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+        toast(skipped
+          ? ("Done — but " + skipped + " clip(s) couldn't be extracted and were skipped.")
+          : "Compilation ready! Downloading…", 4200);
+      })
+      .catch(err => toast("Compilation failed: " + (err.message || err), 5000))
+      .finally(() => setCompiling(false));
+  }
+
+  compileBtn.addEventListener("click", openCompileModal);
+  compileCancel.addEventListener("click", closeCompileModal);
+  compileGo.addEventListener("click", doCompile);
+  compileModal.addEventListener("click", (e) => { if (e.target === compileModal) closeCompileModal(); });
+
   clearBtn.addEventListener("click", () => {
-    if (players.length && confirm("Remover todos os players?")) {
+    if (players.length && confirm("Remove all players?")) {
       [...players].forEach(p => removePlayer(p.id));
     }
   });
 
-  // Suporte a ?add=url1,url2 na URL da página (para salvar configurações)
+  // Supports ?add=url1,url2 in the page URL (to bookmark setups)
   const startUrls = new URLSearchParams(location.search).get("add");
   if (startUrls) startUrls.split(",").forEach(u => addPlayer(u));
 
