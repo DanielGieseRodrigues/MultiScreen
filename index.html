@@ -730,6 +730,11 @@
   /* ---------- Player creation ---------- */
 
   function addPlayer(raw, quality, presetSrc) {
+    // A preset must be a {type, url} object; anything else (a stray array,
+    // number, etc.) falls back to parsing the raw text.
+    if (!presetSrc || typeof presetSrc !== "object" || Array.isArray(presetSrc) || !presetSrc.url) {
+      presetSrc = null;
+    }
     const src = presetSrc || parseSource(raw);
     if (!src) return;
     if (src.type === "invalid") { toast("Invalid URL: " + raw); return; }
@@ -958,7 +963,10 @@
     }
   }
 
-  // Asks the back-end (yt-dlp) for the real stream, then builds the player.
+  // Asks the back-end for the real stream, then builds the player. The page
+  // is first scanned for <video> elements: when it hosts SEVERAL videos, this
+  // tile is replaced by one tile per video (each already proxied with the
+  // right Referer). Otherwise the normal yt-dlp resolve takes over.
   function resolveAndPlay(rec, src) {
     const loading = document.createElement("div");
     loading.className = "empty";
@@ -967,17 +975,34 @@
       '</code> with yt-dlp.</small>';
     rec.cell.insertBefore(loading, rec.cell.firstChild);
 
-    return fetch("/api/resolve?url=" + encodeURIComponent(src.url) +
-          "&q=" + encodeURIComponent(effectiveQuality(rec)))
+    return fetch("/api/scan?url=" + encodeURIComponent(src.url))
       .then(r => r.json())
-      .then(data => {
-        loading.remove();
-        if (!players.includes(rec)) return; // removed while resolving
-        if (!data.ok) { showError(rec.cell, src.url, data.error); return; }
-        const titleEl = rec.cell.querySelector(".cell-bar .title");
-        if (titleEl && data.title) titleEl.textContent = data.title;
-        rec.media = makeVideo(rec, data.isHls, data.stream);
-        rec.cell.insertBefore(rec.media, rec.cell.querySelector(".cell-bar"));
+      .catch(() => null)
+      .then(scan => {
+        if (!players.includes(rec)) { loading.remove(); return; }
+        if (scan && scan.ok && scan.videos && scan.videos.length >= 2) {
+          loading.remove();
+          removePlayer(rec.id);
+          scan.videos.forEach(v => addPlayer(v.src, null, {
+            type: v.isHls ? "hls" : "file",
+            url: v.url,
+            title: v.title || v.src,
+          }));
+          toast("Found " + scan.videos.length + " videos on the page — one tile each.", 4200);
+          return;
+        }
+        return fetch("/api/resolve?url=" + encodeURIComponent(src.url) +
+              "&q=" + encodeURIComponent(effectiveQuality(rec)))
+          .then(r => r.json())
+          .then(data => {
+            loading.remove();
+            if (!players.includes(rec)) return; // removed while resolving
+            if (!data.ok) { showError(rec.cell, src.url, data.error); return; }
+            const titleEl = rec.cell.querySelector(".cell-bar .title");
+            if (titleEl && data.title) titleEl.textContent = data.title;
+            rec.media = makeVideo(rec, data.isHls, data.stream);
+            rec.cell.insertBefore(rec.media, rec.cell.querySelector(".cell-bar"));
+          });
       })
       .catch(() => {
         loading.remove();
@@ -1052,8 +1077,10 @@
     e.preventDefault();
     const val = urlInput.value.trim();
     if (!val) return;
-    // Allows pasting several URLs separated by spaces or line breaks
-    val.split(/[\s\n]+/).filter(Boolean).forEach(addPlayer);
+    // Allows pasting several URLs separated by spaces or line breaks.
+    // (Not .forEach(addPlayer): forEach's index/array would land in the
+    // quality/presetSrc parameters and break every player.)
+    val.split(/[\s\n]+/).filter(Boolean).forEach(u => addPlayer(u));
     urlInput.value = "";
     urlInput.focus();
   });

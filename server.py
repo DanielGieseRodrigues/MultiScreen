@@ -10,6 +10,11 @@ Serves the static app (index.html) and exposes a small API:
       that already goes through our /api/proxy (with the right headers).
       Results are cached for a few minutes so reloads are instant.
 
+  GET /api/scan?url=<page>
+      Finds every <video> element on the page and returns one proxied entry
+      per video (Referer set to the page), so a page with N players becomes
+      N tiles. The front-end tries this before the yt-dlp resolve.
+
   GET /api/proxy?p=<base64>
       Pipes the video/manifest through the server, injecting the headers
       (Referer/User-Agent) the site requires and enabling CORS for the
@@ -140,6 +145,13 @@ def _setup_impersonation():
     TLS/HTTP fingerprint and answer 403/410 even with a fresh yt-dlp. With
     curl_cffi installed, yt-dlp can mimic a real browser handshake and get
     through. Returns an ImpersonateTarget, or None to keep the normal client.
+
+    Impersonation is a FALLBACK, not the default: YouTube binds the stream
+    URLs it hands to an impersonated Chrome to that client session, so the
+    proxy's later fetch of those URLs gets 403 — every tile then shows the
+    generic playback error. Extracting with the plain client first keeps
+    YouTube & friends working; impersonation kicks in only when the plain
+    extraction fails (fingerprint-blocking sites).
     """
     import importlib.util
     if importlib.util.find_spec("curl_cffi") is None:
@@ -208,18 +220,74 @@ class _UrllibUpstream:
             pass
 
 
-def open_upstream(target, headers):
-    """GETs `target`, reusing pooled keep-alive connections when possible."""
-    if _SESSION is not None:
-        resp = _SESSION.get(target, headers=headers, stream=True,
-                            timeout=(10, 30), allow_redirects=True)
-        if resp.status_code >= 400:
-            code = resp.status_code
-            resp.close()
-            raise urllib.error.HTTPError(target, code, "upstream error", None, None)
-        return _RequestsUpstream(resp)
-    req = urllib.request.Request(target, headers=headers)
-    return _UrllibUpstream(urllib.request.urlopen(req, timeout=30))
+class _CurlUpstream:
+    """Response wrapper: curl_cffi with browser impersonation (streamed)."""
+
+    def __init__(self, resp):
+        self._resp = resp
+        self.status = resp.status_code
+
+    def header(self, name, default=None):
+        return self._resp.headers.get(name, default)
+
+    def read(self):
+        return b"".join(self.chunks())
+
+    def chunks(self):
+        return self._resp.iter_content(CHUNK_SIZE)
+
+    def close(self):
+        try:
+            self._resp.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+# curl_cffi sessions are not thread-safe; keep one per handler thread so
+# impersonated streams still reuse keep-alive connections.
+_curl_local = threading.local()
+
+
+def _open_upstream_curl(target, headers):
+    from curl_cffi import requests as curl_requests
+    sess = getattr(_curl_local, "session", None)
+    if sess is None:
+        sess = curl_requests.Session(impersonate="chrome")
+        _curl_local.session = sess
+    resp = sess.get(target, headers=headers, stream=True,
+                    timeout=30, allow_redirects=True)
+    if resp.status_code >= 400:
+        code = resp.status_code
+        resp.close()
+        raise urllib.error.HTTPError(target, code, "upstream error", None, None)
+    return _CurlUpstream(resp)
+
+
+def open_upstream(target, headers, impersonated=False):
+    """GETs `target`, reusing pooled keep-alive connections when possible.
+
+    `impersonated` marks streams whose extraction needed browser
+    impersonation — their CDNs fingerprint clients too, so fetch them with
+    curl_cffi from the start. Plain fetches that bounce with 403 also get one
+    impersonated retry (hotlink protection that only bites at download time).
+    """
+    if impersonated and _IMPERSONATE is not None:
+        return _open_upstream_curl(target, headers)
+    try:
+        if _SESSION is not None:
+            resp = _SESSION.get(target, headers=headers, stream=True,
+                                timeout=(10, 30), allow_redirects=True)
+            if resp.status_code >= 400:
+                code = resp.status_code
+                resp.close()
+                raise urllib.error.HTTPError(target, code, "upstream error", None, None)
+            return _RequestsUpstream(resp)
+        req = urllib.request.Request(target, headers=headers)
+        return _UrllibUpstream(urllib.request.urlopen(req, timeout=30))
+    except urllib.error.HTTPError as e:
+        if e.code == 403 and _IMPERSONATE is not None:
+            return _open_upstream_curl(target, headers)
+        raise
 
 
 def next_proxy_port():
@@ -228,16 +296,24 @@ def next_proxy_port():
         return next(_port_cycle)
 
 
-def encode_target(url, headers):
-    """Packs (url + headers) into a base64 token used by /api/proxy."""
-    raw = json.dumps({"url": url, "headers": headers}).encode("utf-8")
+def encode_target(url, headers, impersonated=False, org=None, qmax=None):
+    """Packs the proxy token: stream URL + headers, plus the impersonation
+    flag and — for resolved streams — the ORIGINAL page URL and quality, so
+    the proxy can re-extract on the spot when the stream URL goes stale
+    (expired link, rolling 403 enforcement)."""
+    obj = {"url": url, "headers": headers}
+    if impersonated:
+        obj["imp"] = True
+    if org:
+        obj["org"] = org
+        obj["q"] = qmax
+    raw = json.dumps(obj).encode("utf-8")
     return base64.urlsafe_b64encode(raw).decode("ascii")
 
 
 def decode_target(token):
     raw = base64.urlsafe_b64decode(token.encode("ascii"))
-    obj = json.loads(raw.decode("utf-8"))
-    return obj["url"], obj.get("headers", {})
+    return json.loads(raw.decode("utf-8"))
 
 
 def is_hls(url, protocol=""):
@@ -414,21 +490,31 @@ def resolve_stream(url, qmax):
         "noplaylist": True,
         "format": build_format(qmax),
     }
-    if _IMPERSONATE is not None:
-        opts["impersonate"] = _IMPERSONATE
+    # Plain client first; impersonation only as a fallback (see
+    # _setup_impersonation for why always-on impersonation breaks YouTube).
+    info = None
+    used_impersonation = False
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
-    except Exception as e:  # noqa: BLE001 — surface any failure to the user
-        msg = str(e).splitlines()[-1] if str(e) else "extraction failed"
-        low = msg.lower()
-        if "410" in low or "gone" in low or "generic" in low or "unable to download webpage" in low:
-            msg += "  →  yt-dlp may be outdated (pip install -U yt-dlp)"
-            if _IMPERSONATE is None:
-                msg += " or the site blocks non-browser clients (pip install -U curl_cffi)"
-        elif ("403" in low or "forbidden" in low) and _IMPERSONATE is None:
-            msg += "  →  site may block non-browser clients: pip install -U curl_cffi"
-        raise ResolveError(msg)
+    except Exception as e:  # noqa: BLE001
+        if _IMPERSONATE is not None:
+            try:
+                with yt_dlp.YoutubeDL({**opts, "impersonate": _IMPERSONATE}) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                used_impersonation = True
+            except Exception as e2:  # noqa: BLE001
+                e = e2
+        if info is None:
+            msg = str(e).splitlines()[-1] if str(e) else "extraction failed"
+            low = msg.lower()
+            if "410" in low or "gone" in low or "generic" in low or "unable to download webpage" in low:
+                msg += "  →  yt-dlp may be outdated (pip install -U yt-dlp)"
+                if _IMPERSONATE is None:
+                    msg += " or the site blocks non-browser clients (pip install -U curl_cffi)"
+            elif ("403" in low or "forbidden" in low) and _IMPERSONATE is None:
+                msg += "  →  site may block non-browser clients: pip install -U curl_cffi"
+            raise ResolveError(msg)
 
     if info is None:
         raise ResolveError("nothing found")
@@ -457,6 +543,7 @@ def resolve_stream(url, qmax):
         "stream_url": stream_url,
         "headers": headers,
         "isHls": is_hls(stream_url, info.get("protocol", "")),
+        "impersonated": used_impersonation,
     }
 
     with _resolve_lock:
@@ -465,6 +552,97 @@ def resolve_stream(url, qmax):
             for k in [k for k, v in _resolve_cache.items() if v[0] <= now]:
                 del _resolve_cache[k]
     return result
+
+
+def _fetch_page_html(page_url):
+    """Downloads a page's HTML for scanning. Falls back to browser
+    impersonation when the plain client is blocked. Returns (html, used_imp)."""
+    headers = {
+        "User-Agent": DEFAULT_UA,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.8",
+    }
+    max_bytes = 4 * 1024 * 1024  # HTML pages beyond this are not worth scanning
+    try:
+        if _SESSION is not None:
+            r = _SESSION.get(page_url, headers=headers, timeout=(10, 30),
+                             allow_redirects=True)
+            if r.status_code >= 400:
+                raise urllib.error.HTTPError(page_url, r.status_code,
+                                             "upstream error", None, None)
+            return r.content[:max_bytes].decode("utf-8", "replace"), False
+        req = urllib.request.Request(page_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.read(max_bytes).decode("utf-8", "replace"), False
+    except Exception as e:  # noqa: BLE001
+        if _IMPERSONATE is None:
+            raise ResolveError("couldn't fetch the page: %s" % e)
+        try:
+            from curl_cffi import requests as curl_requests
+            r = curl_requests.get(page_url, headers=headers, timeout=30,
+                                  impersonate="chrome")
+            if r.status_code >= 400:
+                raise ResolveError("page returned HTTP %d" % r.status_code)
+            return r.content[:max_bytes].decode("utf-8", "replace"), True
+        except ResolveError:
+            raise
+        except Exception as e2:  # noqa: BLE001
+            raise ResolveError("couldn't fetch the page: %s" % e2)
+
+
+_SRC_ATTR_RE = re.compile(r'\bsrc\s*=\s*["\']([^"\']+)["\']', re.I)
+_TYPE_ATTR_RE = re.compile(r'\btype\s*=\s*["\']([^"\']+)["\']', re.I)
+_SOURCE_TAG_RE = re.compile(r"<source\b[^>]*>", re.I)
+_VIDEO_OPEN_RE = re.compile(r"<video\b[^>]*>", re.I)
+_TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
+
+
+def scan_page_videos(page_url):
+    """Finds every <video> element on a page and returns one media URL each.
+
+    A <video> can carry its stream in a src attribute or in child <source>
+    tags; multiple <source> children are quality/format ALTERNATES of the same
+    video, so only the first playable one counts. Returns
+    (page_title, [absolute media urls], used_impersonation).
+    """
+    import html as _html
+
+    text, used_imp = _fetch_page_html(page_url)
+
+    tm = _TITLE_RE.search(text)
+    page_title = re.sub(r"\s+", " ", tm.group(1)).strip() if tm else ""
+
+    videos, seen = [], set()
+
+    def add(candidate):
+        """Records a playable candidate; returns True when it was usable."""
+        candidate = (candidate or "").strip()
+        if not candidate or candidate.startswith(("blob:", "data:")):
+            return False
+        absolute = urllib.parse.urljoin(page_url, _html.unescape(candidate))
+        if absolute not in seen:
+            seen.add(absolute)
+            videos.append(absolute)
+        return True
+
+    for m in _VIDEO_OPEN_RE.finditer(text):
+        open_tag = m.group(0)
+        end = text.find("</video", m.end())
+        block = text[m.end(): end if end != -1 else m.end() + 5000]
+
+        sm = _SRC_ATTR_RE.search(open_tag)
+        if sm and add(sm.group(1)):
+            continue
+        for st in _SOURCE_TAG_RE.finditer(block):
+            tag = st.group(0)
+            ty = _TYPE_ATTR_RE.search(tag)
+            if ty and not ty.group(1).lower().strip().startswith("video/"):
+                continue
+            sm = _SRC_ATTR_RE.search(tag)
+            if sm and add(sm.group(1)):
+                break
+
+    return page_title, videos, used_imp
 
 
 def _is_direct_media(url):
@@ -722,6 +900,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/resolve":
             return self.handle_resolve(qs)
+        if path == "/api/scan":
+            return self.handle_scan(qs)
         if path == "/api/proxy":
             return self.handle_proxy(qs)
         if path == "/api/compile/status":
@@ -781,9 +961,10 @@ class Handler(BaseHTTPRequestHandler):
         host = self.headers.get("Host") or "localhost"
         return host.rsplit(":", 1)[0]
 
-    def proxy_url(self, target, headers):
+    def proxy_url(self, target, headers, impersonated=False, org=None, qmax=None):
         """Absolute proxy URL on the next shard port (round-robin)."""
-        token = urllib.parse.quote(encode_target(target, headers))
+        token = urllib.parse.quote(encode_target(target, headers, impersonated,
+                                                 org=org, qmax=qmax))
         return "http://%s:%d/api/proxy?p=%s" % (
             self.request_host(), next_proxy_port(), token)
 
@@ -809,9 +990,41 @@ class Handler(BaseHTTPRequestHandler):
         return self.send_json({
             "ok": True,
             "title": r["title"],
-            "stream": self.proxy_url(r["stream_url"], r["headers"]),
+            "stream": self.proxy_url(r["stream_url"], r["headers"],
+                                     r.get("impersonated", False),
+                                     org=url, qmax=qmax),
             "isHls": r["isHls"],
         })
+
+    # ---------- /api/scan (all <video> elements on a page) ----------
+
+    def handle_scan(self, qs):
+        """Scans a page for <video> elements and returns one entry per video,
+        already proxied with the right Referer, so each can play in its own
+        tile. The front-end uses this before falling back to yt-dlp."""
+        url = (qs.get("url") or [""])[0].strip()
+        if not url:
+            return self.send_json({"ok": False, "error": "Empty URL"}, 400)
+        try:
+            page_title, vids, used_imp = scan_page_videos(url)
+        except ResolveError as e:
+            return self.send_json({"ok": False, "error": e.message}, e.status)
+        except Exception as e:  # noqa: BLE001
+            return self.send_json({"ok": False, "error": str(e)[:200]}, 502)
+
+        # Hotlink protection on these files usually checks the Referer; send
+        # the page they were found on.
+        media_headers = {"User-Agent": DEFAULT_UA, "Referer": url}
+        items = []
+        for i, v in enumerate(vids):
+            name = v.split("?")[0].rsplit("/", 1)[-1] or ("video %d" % (i + 1))
+            items.append({
+                "url": self.proxy_url(v, media_headers, used_imp),
+                "src": v,
+                "isHls": is_hls(v),
+                "title": (page_title + " · " if page_title else "") + name,
+            })
+        return self.send_json({"ok": True, "title": page_title, "videos": items})
 
     # ---------- /api/compile (async job with progress) ----------
 
@@ -1019,12 +1232,33 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------- /api/proxy ----------
 
+    def _reresolve_and_open(self, org, qmax, client_range):
+        """Stream URL went stale (403/410/…): re-extract from the original
+        page and open the fresh stream. Returns (upstream, target, headers,
+        impersonated) or None when re-extraction can't save the request."""
+        try:
+            with _resolve_lock:
+                _resolve_cache.pop((org, qmax), None)
+            r = resolve_stream(org, qmax)
+            hdrs = {k: v for k, v in r["headers"].items() if v}
+            hdrs.setdefault("User-Agent", DEFAULT_UA)
+            hdrs.setdefault("Accept-Encoding", "identity")
+            if client_range:
+                hdrs["Range"] = client_range
+            imp = r.get("impersonated", False)
+            upstream = open_upstream(r["stream_url"], hdrs, imp)
+            return upstream, r["stream_url"], r["headers"], imp
+        except Exception:  # noqa: BLE001
+            return None
+
     def handle_proxy(self, qs):
         token = (qs.get("p") or [""])[0]
         if not token:
             return self.send_error(400, "missing token")
         try:
-            target, headers = decode_target(token)
+            tok = decode_target(token)
+            target, headers = tok["url"], tok.get("headers", {})
+            impersonated = bool(tok.get("imp"))
         except Exception:  # noqa: BLE001
             return self.send_error(400, "bad token")
 
@@ -1038,9 +1272,19 @@ class Handler(BaseHTTPRequestHandler):
             req_headers["Range"] = client_range
 
         try:
-            upstream = open_upstream(target, req_headers)
+            upstream = open_upstream(target, req_headers, impersonated)
         except urllib.error.HTTPError as e:
-            return self.send_error(e.code, "upstream %s" % e.code)
+            # Stream URLs go stale (expiry, rolling 403 enforcement on
+            # googlevideo & friends). When we know the original page, one
+            # fresh extraction usually revives the tile without the browser
+            # ever noticing.
+            healed = None
+            if tok.get("org") and e.code in (401, 403, 404, 410):
+                healed = self._reresolve_and_open(
+                    tok["org"], tok.get("q"), client_range)
+            if healed is None:
+                return self.send_error(e.code, "upstream %s" % e.code)
+            upstream, target, headers, impersonated = healed
         except Exception as e:  # noqa: BLE001
             return self.send_error(502, "upstream failed: %s" % e)
 
@@ -1053,7 +1297,8 @@ class Handler(BaseHTTPRequestHandler):
             upstream.close()
             try:
                 text = body.decode("utf-8", "replace")
-                rewritten = self.rewrite_hls(text, target, headers).encode("utf-8")
+                rewritten = self.rewrite_hls(text, target, headers,
+                                             impersonated).encode("utf-8")
             except Exception:  # noqa: BLE001
                 rewritten = body
             self.send_response(200)
@@ -1091,7 +1336,7 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             upstream.close()
 
-    def rewrite_hls(self, text, base_url, headers):
+    def rewrite_hls(self, text, base_url, headers, impersonated=False):
         """Rewrites HLS manifest URIs to go through /api/proxy.
 
         Each URI gets an absolute URL on a round-robin shard port, so segment
@@ -1100,7 +1345,7 @@ class Handler(BaseHTTPRequestHandler):
         """
         def proxy_for(u):
             absolute = urllib.parse.urljoin(base_url, u)
-            return self.proxy_url(absolute, headers)
+            return self.proxy_url(absolute, headers, impersonated)
 
         out = []
         attr_uri = re.compile(r'URI="([^"]+)"')
@@ -1163,7 +1408,7 @@ def main():
     except ImportError:
         print("yt-dlp NOT installed:   pip install -U yt-dlp  (needed for generic sites)")
     if _IMPERSONATE is not None:
-        print("Browser impersonation:  ON (%s)  — bypasses many 403/410 blocks" % _IMPERSONATE)
+        print("Browser impersonation:  ON (%s)  — fallback for 403/410 blocks" % _IMPERSONATE)
     else:
         print("Browser impersonation:  OFF — install it to beat 403/410 blocks: "
               "pip install -U curl_cffi")
