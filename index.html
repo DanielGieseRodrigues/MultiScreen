@@ -172,6 +172,12 @@
     white-space: nowrap;
     text-shadow: 0 1px 2px #000;
   }
+  .cell-bar .cached {
+    font-size: 11px;
+    flex: 0 0 auto;
+    opacity: .85;
+    text-shadow: 0 1px 2px #000;
+  }
   .cell-bar .btns { display: flex; gap: 4px; pointer-events: auto; }
   .cell-bar button {
     padding: 4px 8px;
@@ -461,9 +467,10 @@
         <option value="4">4 columns</option>
       </select>
       <label for="qualitySelect">Quality</label>
-      <select id="qualitySelect" title="Maximum resolution for streams resolved through the server">
+      <select id="qualitySelect" title="Maximum resolution for streams resolved through the server. Auto picks by how many tiles are open (more tiles → lower res → less GPU).">
+        <option value="auto" selected>Auto (by tiles)</option>
         <option value="360">360p (fastest)</option>
-        <option value="480" selected>480p (balanced)</option>
+        <option value="480">480p (balanced)</option>
         <option value="720">720p</option>
         <option value="0">Source</option>
       </select>
@@ -475,8 +482,9 @@
       <button id="fsAllBtn" title="Fullscreen with all videos">⛶ Fullscreen</button>
       <span class="sep"></span>
       <button id="saveBtn" title="Download the current setup as a .json file">💾 Save</button>
-      <button id="loadBtn" title="Load a MultiScreen from a .json file">📂 Load</button>
-      <input type="file" id="loadFileInput" accept=".json,application/json" hidden>
+      <button id="packBtn" title="Download setup + the videos themselves as one .zip — reload later with zero re-downloading">📦 Pack</button>
+      <button id="loadBtn" title="Load a MultiScreen from a .json or a .zip package">📂 Load</button>
+      <input type="file" id="loadFileInput" accept=".json,application/json,.zip,application/zip" hidden>
       <button id="mergeBtn" title="Merge several saved .json files into a single one">🧬 Merge</button>
       <input type="file" id="mergeFileInput" accept=".json,application/json" multiple hidden>
       <span class="sep"></span>
@@ -587,6 +595,7 @@
   const fsAllBtn = document.getElementById("fsAllBtn");
   const saveBtn = document.getElementById("saveBtn");
   const loadBtn = document.getElementById("loadBtn");
+  const packBtn = document.getElementById("packBtn");
   const mergeBtn = document.getElementById("mergeBtn");
   const mergeFileInput = document.getElementById("mergeFileInput");
   const clearBtn = document.getElementById("clearBtn");
@@ -622,6 +631,15 @@
   let allMuted = true;
   let loopEnabled = loopToggle.checked; // suggested ON by default
   let toastTimer = null;
+
+  // Full preload: with many short videos looping, every loop restart hits
+  // the proxy again (it doesn't cache) and N tiles refetching in bursts is
+  // what causes the stutter. So each short file is downloaded ONCE into a
+  // Blob and the <video> is switched to it — after that the loop is 100%
+  // local (no network, no server). Caps keep memory sane on big walls.
+  const PRELOAD_MAX_BYTES = 80 * 1024 * 1024;      // per video
+  const PRELOAD_BUDGET_BYTES = 1024 * 1024 * 1024; // across all tiles
+  let preloadBytesUsed = 0;
 
   // Quality tiers offered per video (mirrors the global selector). An empty
   // value means "follow the global Quality selector in the toolbar".
@@ -852,10 +870,15 @@
   }
 
   // Effective quality (px cap) for a resolve request: the per-video override
-  // if set, otherwise whatever the global toolbar selector says.
+  // if set, otherwise the toolbar selector. "auto" adapts to the wall size —
+  // 16 tiny tiles decoding 720p each is what pins the GPU, and in a small
+  // tile the difference is invisible anyway.
   function effectiveQuality(rec) {
-    return rec.quality !== "" && rec.quality != null
+    const q = rec.quality !== "" && rec.quality != null
       ? rec.quality : qualitySelect.value;
+    if (q !== "auto") return q;
+    const n = players.length;
+    return n >= 10 ? "360" : n >= 5 ? "480" : "720";
   }
 
   // Change a single video's quality and re-resolve it in place.
@@ -888,6 +911,10 @@
     const rec = players.find(p => p.id === id);
     if (!rec) return;
     cancelRecord(rec); // a reload swaps the <video>, so drop any in-progress take
+    // Server-resolved streams get a fresh URL (and maybe a new quality) on
+    // reload, so their cached Blob is stale. Direct files keep theirs and
+    // remount instantly from memory.
+    if (rec.type === "resolve") dropPreload(rec);
     if (rec.media && rec.media._hls) rec.media._hls.destroy();
     if (rec.media) rec.media.remove();
     rec.media = null;
@@ -926,15 +953,142 @@
         hls.loadSource(url);
         hls.attachMedia(video);
         video._hls = hls;
-        hls.on(Hls.Events.ERROR, (_e, data) => { if (data.fatal) showError(rec.cell, url); });
+        hls.on(Hls.Events.ERROR, (_e, data) => { if (data.fatal) failOrRetry(rec, url); });
+        // Short VOD in a loop: the lean buffers above evict everything
+        // behind the playhead, so each loop restart refetches the whole
+        // stream through the proxy. If the clip is short, keep ALL of it
+        // buffered instead — the restart then plays straight from memory.
+        // (hls.js reads these config values continuously, so mutating the
+        // instance config after the level loads is enough.)
+        hls.on(Hls.Events.LEVEL_LOADED, (_e, data) => {
+          const d = data.details;
+          if (d && !d.live && d.totalduration > 0 && d.totalduration <= 90) {
+            hls.config.maxBufferLength = Math.ceil(d.totalduration) + 5;
+            hls.config.maxMaxBufferLength = Math.ceil(d.totalduration) + 10;
+            hls.config.backBufferLength = Infinity;
+            hls.config.maxBufferSize = 60 * 1000 * 1000;
+          }
+        });
       } else {
         video.src = url;
       }
     } else {
-      video.src = url;
+      rec._isHlsMedia = useHls; // native HLS (Safari) — a Blob of the
+                                // playlist wouldn't play, so never preload
+      if (!useHls && rec._blobUrl) {
+        video.src = rec._blobUrl; // already fully cached from a prior mount
+      } else {
+        video.src = url;
+        if (!useHls) preloadFullVideo(rec, video, url);
+      }
     }
-    video.addEventListener("error", () => showError(rec.cell, url));
+    video.addEventListener("error", () => failOrRetry(rec, url));
     return video;
+  }
+
+  // Downloads the whole file into a Blob and swaps the <video> to it, so
+  // looping never touches the network again. Silently gives up (and leaves
+  // the tile streaming as before) on CORS errors, oversized files or when
+  // the memory budget is spent.
+  function preloadFullVideo(rec, video, url) {
+    if (!loopEnabled || rec._blobUrl || rec._preloading) return;
+    rec._preloading = true;
+    const ctrl = new AbortController();
+    rec._preloadAbort = ctrl;
+    fetch(url, { signal: ctrl.signal })
+      .then(async res => {
+        if (!res.ok || !res.body) throw new Error("http " + res.status);
+        const declared = parseInt(res.headers.get("Content-Length") || "0", 10);
+        if (declared > PRELOAD_MAX_BYTES ||
+            preloadBytesUsed + (declared || 0) > PRELOAD_BUDGET_BYTES) {
+          ctrl.abort();
+          throw new Error("too big");
+        }
+        const reader = res.body.getReader();
+        const chunks = [];
+        let got = 0;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          got += value.byteLength;
+          // Streams without Content-Length are size-guarded as they arrive.
+          if (got > PRELOAD_MAX_BYTES || preloadBytesUsed + got > PRELOAD_BUDGET_BYTES) {
+            ctrl.abort();
+            throw new Error("too big");
+          }
+          chunks.push(value);
+        }
+        // The tile may have been closed or reloaded while downloading.
+        if (!players.includes(rec) || rec.media !== video) return;
+        const type = res.headers.get("Content-Type") || "video/mp4";
+        rec._blob = new Blob(chunks, { type }); // kept for "📦 Pack" export
+        rec._blobUrl = URL.createObjectURL(rec._blob);
+        rec._blobBytes = got;
+        preloadBytesUsed += got;
+        swapToBlob(rec, video);
+        markCached(rec);
+      })
+      .catch(() => {}) // aborted / CORS / too big → keep streaming playback
+      .finally(() => { rec._preloading = false; rec._preloadAbort = null; });
+  }
+
+  // Switches an already-playing <video> to its cached Blob without breaking
+  // the flow: same position, same play/pause state.
+  function swapToBlob(rec, video) {
+    const t = video.currentTime;
+    const wasPaused = video.paused;
+    video.src = rec._blobUrl;
+    video.addEventListener("loadedmetadata", () => {
+      try {
+        if (t > 0 && isFinite(video.duration)) {
+          video.currentTime = Math.min(t, Math.max(0, video.duration - 0.05));
+        }
+      } catch (e) {}
+      if (!wasPaused) video.play().catch(() => {});
+    }, { once: true });
+  }
+
+  function markCached(rec) {
+    if (!rec.bar || rec.bar.querySelector(".cached")) return;
+    const dot = document.createElement("span");
+    dot.className = "cached";
+    dot.textContent = "💾";
+    dot.title = "Totalmente carregado — o loop repete localmente, sem rede";
+    rec.bar.insertBefore(dot, rec.bar.querySelector(".btns"));
+  }
+
+  // Frees a tile's cached Blob (and cancels a download in progress).
+  function dropPreload(rec) {
+    if (rec._preloadAbort) { rec._preloadAbort.abort(); rec._preloadAbort = null; }
+    rec._preloading = false;
+    if (rec._blobUrl) {
+      URL.revokeObjectURL(rec._blobUrl);
+      preloadBytesUsed -= rec._blobBytes || 0;
+      rec._blobUrl = null;
+      rec._blob = null;
+      rec._blobBytes = 0;
+    }
+    const dot = rec.bar && rec.bar.querySelector(".cached");
+    if (dot) dot.remove();
+  }
+
+  // Stream links expire while a wall sits open. For server-resolved tiles a
+  // single automatic reload re-extracts a fresh URL; only a second failure
+  // surfaces the error tile.
+  function failOrRetry(rec, url) {
+    // If the cached Blob itself failed to play, throw it away and go back
+    // to plain streaming before surfacing any error.
+    if (rec._blobUrl && players.includes(rec)) {
+      dropPreload(rec);
+      reloadPlayer(rec.id);
+      return;
+    }
+    if (rec.type === "resolve" && !rec._retriedOnce && players.includes(rec)) {
+      rec._retriedOnce = true;
+      reloadPlayer(rec.id);
+      return;
+    }
+    showError(rec.cell, url);
   }
 
   /* ---------- Server resolve (yt-dlp), throttled ---------- */
@@ -1029,6 +1183,7 @@
     if (idx === -1) return;
     const p = players[idx];
     cancelRecord(p);
+    dropPreload(p);
     if (p.media && p.media._hls) p.media._hls.destroy();
     p.cell.remove();
     players.splice(idx, 1);
@@ -1104,7 +1259,9 @@
       reloadPlayer(p.id);
     });
     toast("Reloading " + resolvable.length + " video(s) at " +
-      (qualitySelect.value === "0" ? "source" : qualitySelect.value + "p") + "…", 3000);
+      (qualitySelect.value === "0" ? "source"
+        : qualitySelect.value === "auto" ? "auto (by tile count)"
+        : qualitySelect.value + "p") + "…", 3000);
   });
 
   // Loop toggle: <video> players flip instantly; YouTube/Vimeo iframes need
@@ -1115,6 +1272,11 @@
       if (!p.media) return;
       if (p.media.tagName === "VIDEO") {
         p.media.loop = loopEnabled;
+        // Loop just turned on: cache the file locally so the restarts
+        // don't hammer the proxy (HLS tiles handle this via hls.js config).
+        if (loopEnabled && !p.media._hls && !p._isHlsMedia && !p._blobUrl) {
+          preloadFullVideo(p, p.media, p.media.currentSrc || p.media.src);
+        }
       } else if (p.media.tagName === "IFRAME" &&
                  /youtube\.com\/embed|player\.vimeo\.com/.test(p.media.src || "")) {
         reloadPlayer(p.id);
@@ -1197,9 +1359,10 @@
     if (cfg && Array.isArray(cfg.items)) {
       return cfg.items
         .map(it => (typeof it === "string"
-          ? { url: it, quality: "" }
-          : { url: it && it.url, quality: (it && it.quality) || "" }))
-        .filter(it => it.url);
+          ? { url: it, quality: "", file: "", title: "" }
+          : { url: it && it.url, quality: (it && it.quality) || "",
+              file: (it && it.file) || "", title: (it && it.title) || "" }))
+        .filter(it => it.url || it.file);
     }
     if (cfg && Array.isArray(cfg.urls)) {
       return cfg.urls.filter(Boolean).map(u => ({ url: u, quality: "" }));
@@ -1234,6 +1397,262 @@
     };
     reader.onerror = () => toast("Couldn't read the file.");
     reader.readAsText(file);
+  }
+
+  /* ---------- Pack: save/load the setup WITH the videos (.zip) ----------
+     "Save" keeps only the links — reopening re-downloads (and re-resolves)
+     everything, and yt-dlp stream URLs expire. "Pack" also stores the bytes
+     each tile already holds in memory (the preload Blob), so reloading the
+     wall later plays instantly from local files: no network, no yt-dlp, no
+     dead links. ZIP entries use STORE (no compression): video is already
+     compressed, and store keeps both writer and reader tiny. */
+
+  const CRC_TABLE = (() => {
+    const t = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = (c & 1) ? 0xEDB88320 ^ (c >>> 1) : c >>> 1;
+      t[n] = c >>> 0;
+    }
+    return t;
+  })();
+
+  async function crc32Blob(blob) {
+    let crc = 0xFFFFFFFF;
+    // 8 MB slices keep the peak memory flat even for the biggest entries.
+    for (let off = 0; off < blob.size; off += 8 * 1024 * 1024) {
+      const buf = new Uint8Array(
+        await blob.slice(off, off + 8 * 1024 * 1024).arrayBuffer());
+      for (let i = 0; i < buf.length; i++) {
+        crc = CRC_TABLE[(crc ^ buf[i]) & 0xFF] ^ (crc >>> 8);
+      }
+    }
+    return (crc ^ 0xFFFFFFFF) >>> 0;
+  }
+
+  // entries: [{ name, blob }] → Blob de um .zip válido (método STORE).
+  async function buildZip(entries) {
+    const enc = new TextEncoder();
+    const parts = [], central = [];
+    let offset = 0;
+    for (const e of entries) {
+      const nameBytes = enc.encode(e.name);
+      const crc = await crc32Blob(e.blob);
+      const size = e.blob.size;
+      const lh = new DataView(new ArrayBuffer(30));
+      lh.setUint32(0, 0x04034b50, true);  // local file header
+      lh.setUint16(4, 20, true);          // version needed
+      lh.setUint16(6, 0x0800, true);      // flags: UTF-8 names
+      lh.setUint16(8, 0, true);           // method: store
+      lh.setUint32(14, crc, true);
+      lh.setUint32(18, size, true);       // compressed = uncompressed
+      lh.setUint32(22, size, true);
+      lh.setUint16(26, nameBytes.length, true);
+      parts.push(lh.buffer, nameBytes, e.blob);
+      const ch = new DataView(new ArrayBuffer(46));
+      ch.setUint32(0, 0x02014b50, true);  // central directory header
+      ch.setUint16(4, 20, true);
+      ch.setUint16(6, 20, true);
+      ch.setUint16(8, 0x0800, true);
+      ch.setUint32(16, crc, true);
+      ch.setUint32(20, size, true);
+      ch.setUint32(24, size, true);
+      ch.setUint16(28, nameBytes.length, true);
+      ch.setUint32(42, offset, true);     // local header offset
+      central.push(ch.buffer, nameBytes);
+      offset += 30 + nameBytes.length + size;
+    }
+    let centralSize = 0;
+    central.forEach(p => { centralSize += p.byteLength; });
+    const eocd = new DataView(new ArrayBuffer(22));
+    eocd.setUint32(0, 0x06054b50, true);  // end of central directory
+    eocd.setUint16(8, entries.length, true);
+    eocd.setUint16(10, entries.length, true);
+    eocd.setUint32(12, centralSize, true);
+    eocd.setUint32(16, offset, true);
+    return new Blob([...parts, ...central, eocd.buffer],
+                    { type: "application/zip" });
+  }
+
+  // Random-access ZIP reader: only the directory is parsed up front; each
+  // entry is a lazy File.slice, so a 1 GB package never sits in RAM twice.
+  async function parseZip(file) {
+    const tailSize = Math.min(file.size, 65558);
+    const tail = new DataView(
+      await file.slice(file.size - tailSize).arrayBuffer());
+    let eocd = -1;
+    for (let i = tail.byteLength - 22; i >= 0; i--) {
+      if (tail.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+    }
+    if (eocd < 0) throw new Error("not a zip");
+    const count = tail.getUint16(eocd + 10, true);
+    const cdSize = tail.getUint32(eocd + 12, true);
+    const cdOff = tail.getUint32(eocd + 16, true);
+    const cdBuf = await file.slice(cdOff, cdOff + cdSize).arrayBuffer();
+    const cd = new DataView(cdBuf);
+    const dec = new TextDecoder();
+    const entries = {};
+    let p = 0;
+    for (let i = 0; i < count && p + 46 <= cd.byteLength; i++) {
+      if (cd.getUint32(p, true) !== 0x02014b50) break;
+      const method = cd.getUint16(p + 10, true);
+      const size = cd.getUint32(p + 24, true);
+      const nameLen = cd.getUint16(p + 28, true);
+      const extraLen = cd.getUint16(p + 30, true);
+      const commentLen = cd.getUint16(p + 32, true);
+      const lhOff = cd.getUint32(p + 42, true);
+      const name = dec.decode(new Uint8Array(cdBuf, p + 46, nameLen));
+      entries[name] = { method, size, lhOff };
+      p += 46 + nameLen + extraLen + commentLen;
+    }
+    return {
+      names: Object.keys(entries),
+      async read(name) {
+        const e = entries[name];
+        if (!e) return null;
+        if (e.method !== 0) throw new Error("compressed entry — use a pack saved by MultiScreen");
+        const lh = new DataView(
+          await file.slice(e.lhOff, e.lhOff + 30).arrayBuffer());
+        const nLen = lh.getUint16(26, true);
+        const xLen = lh.getUint16(28, true);
+        const start = e.lhOff + 30 + nLen + xLen;
+        return file.slice(start, start + e.size);
+      },
+    };
+  }
+
+  function guessExt(mime, url) {
+    const byMime = { "video/mp4": ".mp4", "video/webm": ".webm",
+                     "video/quicktime": ".mov", "video/ogg": ".ogv",
+                     "video/x-matroska": ".mkv" };
+    if (byMime[(mime || "").split(";")[0]]) return byMime[mime.split(";")[0]];
+    const m = /\.(mp4|webm|mov|mkv|m4v|ogv)(\?|$)/i.exec(url || "");
+    return m ? "." + m[1].toLowerCase() : ".mp4";
+  }
+
+  // 📦 Pack — downloads a .zip with multiscreen.json + every video the
+  // tiles are holding in memory. Tiles that can't be captured (iframes,
+  // HLS, oversized) stay as plain links inside the json.
+  async function downloadPack() {
+    if (!players.length) { toast("Add at least one video before packing."); return; }
+    const name = (prompt("Name for the package:", "MultiScreen") || "").trim();
+    if (!name) return;
+    const original = packBtn.textContent;
+    packBtn.disabled = true;
+    try {
+      const items = [], entries = [];
+      let linked = 0;
+      for (const p of players) {
+        packBtn.textContent = "📦 " + (items.length + 1) + "/" + players.length + "…";
+        const item = { url: p.raw, quality: p.quality || "" };
+        let blob = p._blob || null;
+        if (!blob && p.media && p.media.tagName === "VIDEO" &&
+            !p.media._hls && !p._isHlsMedia) {
+          // Not cached yet (preload still running, or loop was off):
+          // grab it now from the same source the player is using.
+          try {
+            const res = await fetch(p.media.currentSrc || p.url);
+            if (res.ok) {
+              const b = await res.blob();
+              if (b.size <= PRELOAD_MAX_BYTES) blob = b;
+            }
+          } catch (e) {}
+        }
+        if (blob) {
+          const fname = "videos/" +
+            String(entries.length + 1).padStart(2, "0") +
+            guessExt(blob.type, p.raw);
+          entries.push({ name: fname, blob });
+          item.file = fname;
+          const titleEl = p.bar && p.bar.querySelector(".title");
+          item.title = (titleEl && titleEl.textContent.trim()) || "";
+        } else {
+          linked++;
+        }
+        items.push(item);
+      }
+      const config = {
+        app: "multiscreen", version: 2, kind: "pack", name,
+        layout: layoutSelect.value, quality: qualitySelect.value,
+        loop: loopEnabled, items, urls: items.map(it => it.url),
+        ts: Date.now(),
+      };
+      entries.unshift({
+        name: "multiscreen.json",
+        blob: new Blob([JSON.stringify(config, null, 2)],
+                       { type: "application/json" }),
+      });
+      packBtn.textContent = "📦 zipping…";
+      const zip = await buildZip(entries);
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(zip);
+      a.download = sanitizeFileName(name) + ".multiscreen.zip";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+      toast("Package: " + (entries.length - 1) + " video(s) embedded" +
+        (linked ? ", " + linked + " kept as link (iframe/HLS/too big)" : "") +
+        " — " + (zip.size / 1024 / 1024).toFixed(1) + " MB.", 5000);
+    } finally {
+      packBtn.disabled = false;
+      packBtn.textContent = original;
+    }
+  }
+
+  // Uploads a Blob to the local server so the restored tile behaves like
+  // any local file (Range seeking, REC, Compile). Returns the playable URL.
+  async function uploadBlob(blob, name) {
+    const res = await fetch("/api/upload?name=" + encodeURIComponent(name), {
+      method: "POST",
+      headers: { "Content-Type": blob.type || "application/octet-stream" },
+      body: blob,
+    });
+    const data = await res.json();
+    if (!data || !data.ok) throw new Error((data && data.error) || "upload failed");
+    return location.origin + data.url;
+  }
+
+  // 📂 Load of a .zip package: videos go up to the local server once and
+  // every tile plays from disk — nothing is fetched from the internet.
+  async function loadPackage(file) {
+    let zip, cfg;
+    try {
+      zip = await parseZip(file);
+      const cfgBlob = await zip.read("multiscreen.json");
+      cfg = JSON.parse(await cfgBlob.text());
+    } catch (e) {
+      toast("Invalid package: " + (e && e.message || "unreadable .zip"));
+      return;
+    }
+    const items = configItems(cfg);
+    if (!items.length) { toast("This package is empty."); return; }
+    [...players].forEach(p => removePlayer(p.id));
+    if (cfg.layout) layoutSelect.value = cfg.layout;
+    if (cfg.quality != null && cfg.quality !== "") qualitySelect.value = String(cfg.quality);
+    if (typeof cfg.loop === "boolean") { loopEnabled = cfg.loop; loopToggle.checked = cfg.loop; }
+    updateLayout();
+    let restored = 0, fallback = 0;
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      const entry = it.file ? await zip.read(it.file).catch(() => null) : null;
+      if (!entry) { addPlayer(it.url, it.quality); continue; }
+      const fname = sanitizeFileName((it.title || "video " + (i + 1)))
+        .slice(0, 60) + guessExt(entry.type, it.file);
+      toast("Restoring package… " + (i + 1) + "/" + items.length, 60000);
+      try {
+        const url = await uploadBlob(entry, fname);
+        addPlayer(url, it.quality, { type: "file", url, title: it.title || fname });
+        restored++;
+      } catch (e) {
+        // Server unreachable: play straight from the zip bytes instead.
+        const bu = URL.createObjectURL(entry);
+        addPlayer(bu, it.quality, { type: "file", url: bu, title: it.title || fname });
+        fallback++;
+      }
+    }
+    toast("Package loaded: " + restored + " local video(s)" +
+      (fallback ? " + " + fallback + " in memory only" : "") + ".", 4500);
   }
 
   // Merge = pick several saved .json files and combine their videos into one
@@ -1317,9 +1736,16 @@
 
   loadBtn.addEventListener("click", () => loadFileInput.click());
   loadFileInput.addEventListener("change", () => {
-    loadFromFile(loadFileInput.files && loadFileInput.files[0]);
+    const f = loadFileInput.files && loadFileInput.files[0];
+    if (f && (/\.zip$/i.test(f.name) || /zip/.test(f.type))) {
+      loadPackage(f);
+    } else {
+      loadFromFile(f);
+    }
     loadFileInput.value = "";  // allows loading the same file again later
   });
+
+  packBtn.addEventListener("click", downloadPack);
 
   mergeBtn.addEventListener("click", () => mergeFileInput.click());
   mergeFileInput.addEventListener("change", () => {
