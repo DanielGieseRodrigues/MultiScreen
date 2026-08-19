@@ -53,11 +53,33 @@ Uma página web não consegue ler as URLs das outras guias (restrição de segur
 
 Guias repetidas e as que já estão na grade são ignoradas; guias que não são vídeo mostram um erro no tile — é só fechar.
 
+**Ela também resolve links `blob:`.** Player moderno (hls.js, dash.js…) monta o vídeo em JavaScript e entrega ao `<video>` um endereço tipo `blob:https://site.com/uuid`: isso é um ponteiro para a memória daquela guia, não um link — ninguém fora dela consegue abrir, e ele morre junto com a guia. A extensão observa quais streams cada guia baixa (`.m3u8`/`.mpd`/`.mp4`) e entrega o endereço real. Por isso ela pede acesso a todos os sites: só as URLs de mídia são guardadas, na memória da sessão do navegador, e somem quando ele fecha.
+
+Sem a extensão, o caminho é colar a **URL da página** (a da barra de endereços): o servidor procura o manifesto do player dentro do HTML — e, se não achar, abre os `<iframe>` da página e procura lá dentro, que é onde o player quase sempre mora.
+
+## Vídeo em `blob:`
+
+Se o "Copiar endereço do vídeo" te deu algo assim, ele **não é um link** e nenhum programa fora daquela aba consegue abrir. Três saídas, da melhor pra pior:
+
+1. **Cole os dois juntos, na mesma linha** — é o jeito mais confiável:
+
+   ```
+   blob:https://tubevid.site/f8501e71-df78  https://meusite.com/watch/123
+   ```
+
+   O `blob:` não vira player nenhum, mas a origem dele (`tubevid.site`) diz **qual iframe** da página segura o vídeo, e o servidor vai direto nele. Várias linhas = vários vídeos, um par por linha.
+
+2. **Só a URL da página** — funciona quando o manifesto está no HTML ou num iframe achável.
+
+3. **Só o `blob:`** — o app pergunta à extensão qual stream aquela aba baixou. Depende de a aba ter sido carregada com a extensão ativa: se não achar, o aviso diz exatamente o que ela viu.
+
 ## Como funciona
 
 - **`index.html`** — front-end (grade, players, controles). Reconhece localmente arquivos diretos, HLS e os embeds. Qualquer outro link é enviado ao back-end.
 - **`server.py`** — servidor Python (só `stdlib` + `yt-dlp`):
   - `GET /api/resolve?url=` — usa o yt-dlp pra descobrir o stream real da página.
+  - `GET /api/scan?url=[&origin=]` — acha os `<video>` da página; se todos forem `blob:`, o `.m3u8`/`.mpd` escondido no HTML do player; se nem isso, abre os iframes da página e repete lá dentro (`origin` = de qual iframe começar).
+  - `GET /api/wrap?url=&ref=` — embrulha no proxy um stream que o navegador já achou (o que a extensão descobre atrás de um `blob:`).
   - `GET /api/proxy?p=` — repassa o vídeo com os cabeçalhos corretos (Referer/User-Agent), libera CORS e reescreve playlists HLS para tocarem no navegador.
 
 ## Limitações

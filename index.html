@@ -260,6 +260,15 @@
   .empty strong { color: var(--text); font-size: 18px; }
   .empty small { max-width: 460px; line-height: 1.5; }
   .empty code { background: var(--panel-2); padding: 2px 6px; border-radius: 4px; color: var(--accent-hover); }
+  .empty .retry {
+    background: var(--panel-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 14px;
+    cursor: pointer;
+  }
+  .empty .retry:hover { border-color: var(--accent); color: var(--accent-hover); }
   .hint { color: var(--muted); font-size: 12px; }
 
   /* Toast */
@@ -313,6 +322,61 @@
   .modal .modal-sub { color: var(--muted); font-size: 13px; margin-top: -6px; }
   .modal input[type="text"] { flex: none; width: 100%; }
   .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+  /* Trance modal */
+  .trance-grid { display: flex; flex-wrap: wrap; gap: 10px; }
+  .trance-grid .field { display: flex; flex-direction: column; gap: 4px; flex: 1 1 150px; }
+  .trance-grid .field > span,
+  .field-block > .field-label {
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .6px;
+  }
+  .field-block { display: flex; flex-direction: column; gap: 6px; }
+  .modal textarea {
+    width: 100%;
+    min-height: 120px;
+    resize: vertical;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 10px 12px;
+    border-radius: 8px;
+    font: inherit;
+    font-size: 14px;
+    line-height: 1.6;
+    outline: none;
+  }
+  .modal textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(79,140,255,.18); }
+  .modal textarea::placeholder { color: #5d6575; }
+  .modal input[type="number"] {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 9px 12px;
+    border-radius: 8px;
+    font-size: 14px;
+    outline: none;
+    width: 100%;
+  }
+  .modal input[type="number"]:focus { border-color: var(--accent); }
+  .trance-range { display: flex; align-items: center; gap: 8px; }
+  .trance-range input[type="range"] { flex: 1; min-width: 0; accent-color: var(--accent); cursor: pointer; }
+  .trance-range b { font-size: 12px; font-weight: 600; min-width: 36px; text-align: right; }
+  .trance-warn {
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--muted);
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--danger);
+    border-radius: 8px;
+    padding: 9px 11px;
+  }
+  .controls label.check.trance { color: var(--accent-2); }
+  .controls input#tranceToggle { accent-color: var(--accent-2); }
 
   /* Compile modal */
   .modal.wide { max-width: 620px; }
@@ -476,6 +540,9 @@
       </select>
       <label class="check" for="loopToggle">🔁 Loop</label>
       <input type="checkbox" id="loopToggle" checked title="Repeat each video when it ends">
+      <label class="check trance" for="tranceToggle">🌀 Trance</label>
+      <input type="checkbox" id="tranceToggle" title="Hypnotic audio bed + your own phrases, looping behind the videos">
+      <button id="tranceBtn" title="Trance settings: your phrases, frequency and mix">⚙</button>
       <span class="sep"></span>
       <button id="shuffleBtn" title="Randomly rearrange the screens">🔀 Shuffle</button>
       <button id="muteAllBtn" title="Mute/unmute all players">🔇 Muted</button>
@@ -500,7 +567,9 @@
         Paste a video URL above and hit <b>Add</b>.
         Works with <code>.mp4</code>/<code>.webm</code> files, <code>.m3u8</code> streams,
         and links from <b>YouTube</b>, <b>Vimeo</b>, <b>Twitch</b> and <b>Dailymotion</b>.<br>
-        Any other site is resolved by the <b>server (yt-dlp)</b> — ~1800 sites supported.
+        Any other site is resolved by the <b>server (yt-dlp)</b> — ~1800 sites supported.<br>
+        Got a <code>blob:</code> address? It isn't a link — paste it followed by the
+        page's own URL, on the same line, and the player gets tracked down.
       </small>
     </div>
   </div>
@@ -518,6 +587,118 @@
       <div class="modal-actions">
         <button type="button" id="saveCancel">Cancel</button>
         <button type="button" id="saveConfirm" class="primary">💾 Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: trance -->
+  <div class="modal-backdrop" id="tranceModal">
+    <div class="modal wide">
+      <h3>🌀 Trance</h3>
+      <div class="modal-sub">
+        A hypnotic audio bed, synthesised live in the browser, with your own phrases spoken over it on a loop.
+      </div>
+
+      <label class="field-block">
+        <span class="field-label">Your phrases — one per line</span>
+        <textarea id="trancePhrases" placeholder="I am calm, present and in control.&#10;My breathing is slow and deep.&#10;With every breath I let go a little more."></textarea>
+      </label>
+
+      <div class="trance-grid">
+        <label class="field">
+          <span>Brainwave</span>
+          <select id="tranceBeat">
+            <option value="3">Delta 3 Hz · sleep</option>
+            <option value="6">Theta 6 Hz · hypnosis</option>
+            <option value="8">Alpha 8 Hz · calm</option>
+            <option value="10">Alpha 10 Hz · relaxed focus</option>
+            <option value="14">Beta 14 Hz · alert</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Tone</span>
+          <select id="tranceTone">
+            <option value="binaural">Binaural · 🎧 headphones</option>
+            <option value="isochronic">Isochronic · speakers</option>
+            <option value="both">Both</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Background</span>
+          <select id="tranceNoise">
+            <option value="pink">Pink noise</option>
+            <option value="brown">Brown noise</option>
+            <option value="off">None</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Language</span>
+          <select id="tranceLang">
+            <option value="en-US">English (US)</option>
+            <option value="en-GB">English (UK)</option>
+            <option value="pt-BR">Português (BR)</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Voice</span>
+          <select id="tranceVoice"></select>
+        </label>
+        <label class="field">
+          <span>A phrase every (s)</span>
+          <input type="number" id="tranceInterval" min="5" max="300" step="1" value="20">
+        </label>
+        <label class="field">
+          <span>Order</span>
+          <select id="tranceOrder">
+            <option value="sequential">In order</option>
+            <option value="random">Shuffled</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="trance-grid">
+        <label class="field">
+          <span>Bed volume</span>
+          <div class="trance-range">
+            <input type="range" id="tranceBedVol" min="0" max="100" value="35">
+            <b id="tranceBedVolVal">35%</b>
+          </div>
+        </label>
+        <label class="field">
+          <span>Voice volume</span>
+          <div class="trance-range">
+            <input type="range" id="tranceVoiceVol" min="0" max="100" value="100">
+            <b id="tranceVoiceVolVal">100%</b>
+          </div>
+        </label>
+        <label class="field">
+          <span>Speech speed</span>
+          <div class="trance-range">
+            <input type="range" id="tranceRate" min="50" max="120" value="75">
+            <b id="tranceRateVal">0.75×</b>
+          </div>
+        </label>
+        <label class="field">
+          <span>Lower videos while speaking</span>
+          <div class="trance-range">
+            <input type="range" id="tranceDuck" min="0" max="100" value="75">
+            <b id="tranceDuckVal">75%</b>
+          </div>
+        </label>
+      </div>
+
+      <div class="trance-warn">
+        <b>Before you start.</b> Rhythmic stimulation can trigger seizures in people with epilepsy or a
+        history of them — skip this feature if that applies to you, and check with a doctor if you're
+        pregnant, on psychiatric treatment, or recovering from a neurological event. Never use it while
+        driving or operating machinery. Stop if you feel nausea, headache or dizziness. This is a personal
+        experiment, not a medical treatment.
+      </div>
+
+      <div class="modal-actions">
+        <button type="button" id="tranceTest">▶ Test a phrase</button>
+        <button type="button" id="tranceCancel">Close</button>
+        <button type="button" id="tranceStart" class="primary">🌀 Start</button>
       </div>
     </div>
   </div>
@@ -625,6 +806,24 @@
   const localBtn = document.getElementById("localBtn");
   const localFileInput = document.getElementById("localFileInput");
   const tabsBtn = document.getElementById("tabsBtn");
+  const tranceToggle = document.getElementById("tranceToggle");
+  const tranceBtn = document.getElementById("tranceBtn");
+  const tranceModal = document.getElementById("tranceModal");
+  const trancePhrases = document.getElementById("trancePhrases");
+  const tranceBeat = document.getElementById("tranceBeat");
+  const tranceTone = document.getElementById("tranceTone");
+  const tranceNoise = document.getElementById("tranceNoise");
+  const tranceLang = document.getElementById("tranceLang");
+  const tranceVoice = document.getElementById("tranceVoice");
+  const tranceInterval = document.getElementById("tranceInterval");
+  const tranceOrder = document.getElementById("tranceOrder");
+  const tranceBedVol = document.getElementById("tranceBedVol");
+  const tranceVoiceVol = document.getElementById("tranceVoiceVol");
+  const tranceRate = document.getElementById("tranceRate");
+  const tranceDuck = document.getElementById("tranceDuck");
+  const tranceTest = document.getElementById("tranceTest");
+  const tranceCancel = document.getElementById("tranceCancel");
+  const tranceStart = document.getElementById("tranceStart");
 
   const players = []; // { id, cell, bar, raw, url, type, quality, media }
   let nextId = 1;
@@ -663,6 +862,17 @@
   function parseSource(raw) {
     let url = raw.trim();
     if (!url) return null;
+
+    // blob:/mediasource — "Copy video address" on a modern player gives you
+    // this. It is a handle into that tab's own memory: the site runs an MSE
+    // player (hls.js, dash.js…) that builds the video from segments in JS and
+    // hands the element a pointer to the buffer. Nobody outside that tab can
+    // read it — not us, not the server — and it dies with the tab. The origin
+    // is the only usable part, and the extension can turn it into the real
+    // stream, so keep it and let addPlayer try.
+    const mse = url.match(/^(?:blob|mediasource):(https?:\/\/[^/?#]+)/i);
+    if (mse) return { type: "blob", url, origin: mse[1] };
+
     // Add protocol if missing
     if (!/^https?:\/\//i.test(url) && !/^\/\//.test(url)) {
       url = "https://" + url;
@@ -747,7 +957,7 @@
 
   /* ---------- Player creation ---------- */
 
-  function addPlayer(raw, quality, presetSrc) {
+  function addPlayer(raw, quality, presetSrc, sniffed, frameOrigin) {
     // A preset must be a {type, url} object; anything else (a stray array,
     // number, etc.) falls back to parsing the raw text.
     if (!presetSrc || typeof presetSrc !== "object" || Array.isArray(presetSrc) || !presetSrc.url) {
@@ -756,6 +966,9 @@
     const src = presetSrc || parseSource(raw);
     if (!src) return;
     if (src.type === "invalid") { toast("Invalid URL: " + raw); return; }
+    // No tile for a blob: URL — there is nothing to point a player at until
+    // the extension tells us which stream that tab is really playing.
+    if (src.type === "blob") { recoverBlob(src); return; }
 
     const id = nextId++;
     const cell = document.createElement("div");
@@ -771,6 +984,13 @@
       id, cell, bar: null, raw, url: src.url, type: src.type,
       quality: canPickQuality && quality != null ? String(quality) : "",
       media: null, _presetSrc: presetSrc || null,
+      // Streams the extension watched this tab load. Kept as a last resort:
+      // the page URL goes through yt-dlp first (it gives better titles and
+      // real quality options), and this only comes out if that fails.
+      _sniffed: Array.isArray(sniffed) ? sniffed.slice() : null,
+      // Origin of a blob: pasted alongside this link — the embedded player's
+      // host, which tells the server's scan which <iframe> holds the video.
+      _frameOrigin: frameOrigin || "",
     };
 
     const bar = document.createElement("div");
@@ -818,6 +1038,7 @@
     }
 
     grid.appendChild(cell);
+    if (visibility) visibility.observe(cell);
 
     rec.bar = bar;
     players.push(rec);
@@ -878,8 +1099,39 @@
       ? rec.quality : qualitySelect.value;
     if (q !== "auto") return q;
     const n = players.length;
-    return n >= 10 ? "360" : n >= 5 ? "480" : "720";
+    // At 20+ tiles each one is barely bigger than a thumbnail, and it's the
+    // decoding — not the download — that pins the machine.
+    return n >= 20 ? "240" : n >= 10 ? "360" : n >= 5 ? "480" : "720";
   }
+
+  // Past this many tiles the browser is decoding more video than any GPU
+  // keeps up with, so the wall trades niceties for frames: no caching videos
+  // into RAM (that memory is needed for decoding), the smallest HLS
+  // renditions, and tiles scrolled out of sight pause themselves.
+  const WALL_MODE_TILES = 12;
+  function wallMode() { return players.length >= WALL_MODE_TILES; }
+
+  // Pauses tiles that scroll off-screen and resumes them when they come back.
+  // On a 40-tile wall most of the grid is usually outside the viewport, and a
+  // paused <video> costs nothing to decode.
+  const visibility = ("IntersectionObserver" in window)
+    ? new IntersectionObserver((entries) => {
+        if (!wallMode()) return;
+        entries.forEach(en => {
+          const rec = players.find(p => p.cell === en.target);
+          if (!rec || !rec.media || rec.media.tagName !== "VIDEO") return;
+          if (en.isIntersecting) {
+            if (rec._autoPaused) {
+              rec._autoPaused = false;
+              rec.media.play().catch(() => {});
+            }
+          } else if (!rec.media.paused) {
+            rec._autoPaused = true; // only resume what WE paused
+            rec.media.pause();
+          }
+        });
+      }, { threshold: 0.05 })
+    : null;
 
   // Change a single video's quality and re-resolve it in place.
   function setPlayerQuality(id, value) {
@@ -924,6 +1176,16 @@
     mountMedia(rec, src);
   }
 
+  // hls.js comes from a CDN, so a blocked/offline load would otherwise turn
+  // every HLS tile into an unexplained failure. Warn once, not per tile.
+  let hlsWarned = false;
+  function warnHlsMissing() {
+    if (hlsWarned) return;
+    hlsWarned = true;
+    toast("hls.js didn't load (CDN blocked or offline) — HLS streams can't " +
+          "play in this browser without it.", 8000);
+  }
+
   // Creates a <video> (with hls.js when needed) already wired to the stream.
   function makeVideo(rec, useHls, url) {
     const video = document.createElement("video");
@@ -932,8 +1194,20 @@
     video.muted = allMuted;
     video.loop = loopEnabled;
     video.playsInline = true;
-    if (useHls && window.Hls && !video.canPlayType("application/vnd.apple.mpegurl")) {
-      if (Hls.isSupported()) {
+    // hls.js FIRST, native HLS only as the fallback.
+    //
+    // This order is not cosmetic. Chrome answers "maybe" to
+    // canPlayType("application/vnd.apple.mpegurl") while being completely
+    // unable to play HLS, so gating hls.js behind that check meant it was
+    // never instantiated: the .m3u8 went straight into <video>, the element
+    // failed instantly, and every HLS tile died while progressive-mp4 tiles
+    // kept working. Native HLS is genuinely playable only where hls.js has no
+    // MSE to work with (Safari/iOS), which Hls.isSupported() already tells us.
+    if (useHls && window.Hls && Hls.isSupported()) {
+      {
+        // Buffers are per-player, so their cost scales with the wall. 10s each
+        // is fine for a handful of tiles and ruinous across forty.
+        const big = wallMode();
         const hls = new Hls({
           // Each tile is small in an N-video grid: pick the lowest rendition
           // that still covers the player's real size. Avoids pulling 1080p
@@ -943,17 +1217,41 @@
           startLevel: 0,           // start at the lowest rendition
           testBandwidth: false,    // skip the probe download (startLevel 0 already)
           lowLatencyMode: false,   // LL-HLS part-loading burns CPU across N tiles
-          // Lean buffers: with many players at once, 30s each is a lot of
-          // memory/CPU. 10s gives headroom without drowning the machine.
-          maxBufferLength: 10,
-          maxMaxBufferLength: 20,
-          backBufferLength: 10,
-          maxBufferSize: 20 * 1000 * 1000, // ~20 MB per player instead of 60
+          maxBufferLength: big ? 4 : 10,
+          maxMaxBufferLength: big ? 8 : 20,
+          backBufferLength: big ? 0 : 10,
+          maxBufferSize: (big ? 6 : 20) * 1000 * 1000,
+          // A crowded wall makes CDNs rate-limit and drop requests; give
+          // hls.js room to ride that out instead of killing the tile.
+          fragLoadingMaxRetry: 6,
+          manifestLoadingMaxRetry: 4,
+          levelLoadingMaxRetry: 4,
         });
         hls.loadSource(url);
         hls.attachMedia(video);
         video._hls = hls;
-        hls.on(Hls.Events.ERROR, (_e, data) => { if (data.fatal) failOrRetry(rec, url); });
+        // hls.js can usually recover in place, which is far cheaper than
+        // tearing the tile down and re-extracting the whole page. Only give up
+        // when its own recovery has already been tried.
+        hls.on(Hls.Events.ERROR, (_e, data) => {
+          // Keep the last reason even when non-fatal: the useful detail is
+          // usually in the errors leading up to the fatal one.
+          rec._hlsError = (data.details || data.type || "?") +
+            (data.response && data.response.code ? " (" + data.response.code + ")" : "") +
+            (data.fatal ? " [fatal]" : "");
+          if (!data.fatal) return;
+          if (data.type === Hls.ErrorTypes.NETWORK_ERROR && !video._netRecovered) {
+            video._netRecovered = true;
+            hls.startLoad(); // resume from where the stream dropped
+            return;
+          }
+          if (data.type === Hls.ErrorTypes.MEDIA_ERROR && !video._mediaRecovered) {
+            video._mediaRecovered = true;
+            hls.recoverMediaError();
+            return;
+          }
+          failOrRetry(rec, url);
+        });
         // Short VOD in a loop: the lean buffers above evict everything
         // behind the playhead, so each loop restart refetches the whole
         // stream through the proxy. If the clip is short, keep ALL of it
@@ -962,6 +1260,7 @@
         // instance config after the level loads is enough.)
         hls.on(Hls.Events.LEVEL_LOADED, (_e, data) => {
           const d = data.details;
+          if (wallMode()) return; // buffering whole clips × 40 blows up memory
           if (d && !d.live && d.totalduration > 0 && d.totalduration <= 90) {
             hls.config.maxBufferLength = Math.ceil(d.totalduration) + 5;
             hls.config.maxMaxBufferLength = Math.ceil(d.totalduration) + 10;
@@ -969,10 +1268,15 @@
             hls.config.maxBufferSize = 60 * 1000 * 1000;
           }
         });
-      } else {
-        video.src = url;
       }
     } else {
+      // An HLS stream reaching this branch relies on the browser playing it
+      // natively. That is true on Safari; anywhere else it means hls.js never
+      // loaded, so say it out loud instead of handing <video> a file it cannot
+      // decode and calling it a mystery.
+      if (useHls && !window.Hls) {
+        warnHlsMissing();
+      }
       rec._isHlsMedia = useHls; // native HLS (Safari) — a Blob of the
                                 // playlist wouldn't play, so never preload
       if (!useHls && rec._blobUrl) {
@@ -983,15 +1287,77 @@
       }
     }
     video.addEventListener("error", () => failOrRetry(rec, url));
+    // Forget earlier failures so a tile that hiccups once an hour keeps its
+    // full retry budget instead of slowly using it up. It has to *stay*
+    // playing to count: resetting on the first `playing` event would let a
+    // stream that dies right after starting retry itself forever.
+    video.addEventListener("playing", () => {
+      clearTimeout(rec._steadyTimer);
+      rec._steadyTimer = setTimeout(() => { rec._retries = 0; }, 15000);
+    });
     return video;
+  }
+
+  // Caching for the loop is a *second* full download of every tile. Fired the
+  // moment each <video> was created, N tiles meant 2N simultaneous streams
+  // through the proxy — the wall fought itself for bandwidth and connections,
+  // and tiles stalled or errored out. So preloads are queued instead: they
+  // wait until nothing is still resolving, then run a couple at a time.
+  const MAX_CONCURRENT_PRELOADS = 2;
+  let activePreloads = 0;
+  let preloadWakeup = null;
+  const preloadQueue = [];
+
+  function preloadFullVideo(rec, video, url) {
+    if (!loopEnabled || rec._blobUrl || rec._preloading || rec._preloadQueued) return;
+    // On a big wall this cache is counterproductive: up to a gigabyte of Blobs
+    // competing with the decoders for exactly the memory they need.
+    if (wallMode()) return;
+    // Files we uploaded are already on this machine's disk and are served with
+    // Range support — copying them into browser RAM buys nothing.
+    if (/^(https?:)?\/\/[^/]+\/api\/localfile\//.test(url) ||
+        url.startsWith("/api/localfile/")) return;
+    rec._preloadQueued = true;
+    preloadQueue.push({ rec, video, url });
+    // Deferred on purpose: makeVideo() calls this *before* its caller assigns
+    // rec.media, and pumpPreloads uses that identity to recognise stale tiles.
+    // Pumping synchronously would see rec.media === null and drop every job.
+    setTimeout(pumpPreloads, 0);
+  }
+
+  function pumpPreloads() {
+    if (!preloadQueue.length) return;
+    // The wall grows while tiles queue up — adding 40 links means the first
+    // dozen were queued back when the wall still looked small. Re-check here,
+    // or those would be the only ones to hog memory the decoders now need.
+    if (wallMode()) {
+      preloadQueue.forEach(job => { job.rec._preloadQueued = false; });
+      preloadQueue.length = 0;
+      return;
+    }
+    // Getting the wall playing always wins over caching it.
+    if (activeResolves || resolveWaiting.length) {
+      if (!preloadWakeup) {
+        preloadWakeup = setTimeout(() => { preloadWakeup = null; pumpPreloads(); }, 1500);
+      }
+      return;
+    }
+    while (activePreloads < MAX_CONCURRENT_PRELOADS && preloadQueue.length) {
+      const job = preloadQueue.shift();
+      job.rec._preloadQueued = false;
+      // The tile may have been closed, reloaded or already cached while queued.
+      if (!players.includes(job.rec) || job.rec.media !== job.video ||
+          job.rec._blobUrl || !loopEnabled) continue;
+      activePreloads++;
+      startPreload(job.rec, job.video, job.url);
+    }
   }
 
   // Downloads the whole file into a Blob and swaps the <video> to it, so
   // looping never touches the network again. Silently gives up (and leaves
   // the tile streaming as before) on CORS errors, oversized files or when
   // the memory budget is spent.
-  function preloadFullVideo(rec, video, url) {
-    if (!loopEnabled || rec._blobUrl || rec._preloading) return;
+  function startPreload(rec, video, url) {
     rec._preloading = true;
     const ctrl = new AbortController();
     rec._preloadAbort = ctrl;
@@ -1029,7 +1395,12 @@
         markCached(rec);
       })
       .catch(() => {}) // aborted / CORS / too big → keep streaming playback
-      .finally(() => { rec._preloading = false; rec._preloadAbort = null; });
+      .finally(() => {
+        rec._preloading = false;
+        rec._preloadAbort = null;
+        activePreloads--;
+        pumpPreloads();
+      });
   }
 
   // Switches an already-playing <video> to its cached Blob without breaking
@@ -1061,6 +1432,9 @@
   function dropPreload(rec) {
     if (rec._preloadAbort) { rec._preloadAbort.abort(); rec._preloadAbort = null; }
     rec._preloading = false;
+    // Any queued entry for this tile is now stale; pumpPreloads skips it
+    // (its `media` no longer matches) and this lets the tile queue again.
+    rec._preloadQueued = false;
     if (rec._blobUrl) {
       URL.revokeObjectURL(rec._blobUrl);
       preloadBytesUsed -= rec._blobBytes || 0;
@@ -1072,55 +1446,118 @@
     if (dot) dot.remove();
   }
 
-  // Stream links expire while a wall sits open. For server-resolved tiles a
-  // single automatic reload re-extracts a fresh URL; only a second failure
-  // surfaces the error tile.
+  // Stream links expire while a wall sits open, and CDNs drop the occasional
+  // request. Every tile type gets a couple of automatic reloads (spaced out,
+  // so a struggling host isn't hammered) before the error tile appears —
+  // server-resolved ones re-extract a fresh URL in the process.
+  const MAX_TILE_RETRIES = 2;
+
   function failOrRetry(rec, url) {
+    // A dying <video>/hls.js instance fires `error` repeatedly; one reload
+    // already on the clock is enough.
+    if (!players.includes(rec) || rec._retryPending) return;
     // If the cached Blob itself failed to play, throw it away and go back
     // to plain streaming before surfacing any error.
-    if (rec._blobUrl && players.includes(rec)) {
+    if (rec._blobUrl) {
       dropPreload(rec);
       reloadPlayer(rec.id);
       return;
     }
-    if (rec.type === "resolve" && !rec._retriedOnce && players.includes(rec)) {
-      rec._retriedOnce = true;
-      reloadPlayer(rec.id);
+    rec._retries = (rec._retries || 0) + 1;
+    if (rec._retries > MAX_TILE_RETRIES) {
+      // The browser reports every failed media fetch identically, so ask the
+      // proxy directly what went wrong instead of showing boilerplate.
+      showError(rec.cell, url, null, rec);
+      explainFailure(rec, url);
       return;
     }
-    showError(rec.cell, url);
+    rec._needFresh = true; // re-extract instead of replaying the dead link
+    const note = document.createElement("div");
+    note.className = "empty";
+    note.innerHTML = '<strong>Reconnecting…</strong><small>attempt ' +
+      rec._retries + ' of ' + MAX_TILE_RETRIES + '</small>';
+    rec.cell.insertBefore(note, rec.cell.firstChild);
+    rec._retryPending = true;
+    setTimeout(() => {
+      rec._retryPending = false;
+      // reloadPlayer clears the note along with the rest of the tile.
+      if (players.includes(rec)) reloadPlayer(rec.id);
+    }, 900 * rec._retries);
   }
 
   /* ---------- Server resolve (yt-dlp), throttled ---------- */
 
-  // Adding 12 links at once would fire 12 yt-dlp extractions simultaneously
-  // and everything crawls. A small queue keeps the first tiles playing fast.
-  const MAX_CONCURRENT_RESOLVES = 4;
+  // Adding a wall of links at once would fire that many yt-dlp extractions
+  // simultaneously and everything crawls. A small queue keeps the first tiles
+  // playing fast.
+  //
+  // The per-HOST cap matters more than the global one. A wall is usually 17
+  // links from the SAME site, and an extraction is a full page load: six at a
+  // time, refilling the instant one finishes, looks like scraping and the site
+  // starts refusing. That is why a handful of tiles played and the rest failed
+  // even though every link was fine — the site was rate-limiting us, not
+  // breaking. Two at a time per host, spaced out, keeps it answering.
+  const MAX_CONCURRENT_RESOLVES = 6;
+  const MAX_RESOLVES_PER_HOST = 2;
+  const HOST_SPACING_MS = 700;   // minimum gap between hits on one host
   let activeResolves = 0;
   const resolveWaiting = [];
+  const hostActive = {};         // host -> extractions in flight
+  const hostLastStart = {};      // host -> timestamp of the last one started
+  let resolveWakeup = null;
+
+  function hostOf(u) {
+    try { return new URL(u).hostname.replace(/^www\./, "").toLowerCase(); }
+    catch (e) { return "?"; }
+  }
 
   function queueResolve(rec, src) {
-    resolveWaiting.push({ rec, src });
+    resolveWaiting.push({ rec, src, host: hostOf(src.url) });
     pumpResolves();
   }
 
   function pumpResolves() {
-    while (activeResolves < MAX_CONCURRENT_RESOLVES && resolveWaiting.length) {
-      const job = resolveWaiting.shift();
-      // Skip players removed while waiting in the queue.
-      if (!players.includes(job.rec)) continue;
+    const now = Date.now();
+    let soonest = Infinity;
+
+    // Walk the queue instead of shifting: a job blocked on its host must not
+    // block jobs for other hosts sitting behind it.
+    for (let i = 0; i < resolveWaiting.length && activeResolves < MAX_CONCURRENT_RESOLVES;) {
+      const job = resolveWaiting[i];
+      if (!players.includes(job.rec)) { resolveWaiting.splice(i, 1); continue; }
+
+      const h = job.host;
+      if ((hostActive[h] || 0) >= MAX_RESOLVES_PER_HOST) { i++; continue; }
+      const wait = (hostLastStart[h] || 0) + HOST_SPACING_MS - now;
+      if (wait > 0) { soonest = Math.min(soonest, wait); i++; continue; }
+
+      resolveWaiting.splice(i, 1);
       activeResolves++;
+      hostActive[h] = (hostActive[h] || 0) + 1;
+      hostLastStart[h] = now;
       resolveAndPlay(job.rec, job.src).finally(() => {
         activeResolves--;
+        hostActive[h]--;
         pumpResolves();
+        pumpPreloads(); // the wall is playing; caching may start
       });
+    }
+
+    // Something is only waiting on the spacing timer — come back for it.
+    if (soonest !== Infinity && !resolveWakeup) {
+      resolveWakeup = setTimeout(() => {
+        resolveWakeup = null;
+        pumpResolves();
+      }, Math.max(50, soonest));
     }
   }
 
-  // Asks the back-end for the real stream, then builds the player. The page
-  // is first scanned for <video> elements: when it hosts SEVERAL videos, this
-  // tile is replaced by one tile per video (each already proxied with the
-  // right Referer). Otherwise the normal yt-dlp resolve takes over.
+  // Asks the back-end for the real stream, then builds the player. One
+  // request does both jobs: the server scans the page for <video> elements
+  // *while* yt-dlp extracts. When the page hosts SEVERAL videos, this tile is
+  // replaced by one tile per video (each already proxied with the right
+  // Referer); otherwise the extracted stream is used. Doing both server-side
+  // and in parallel is what keeps a wall of a dozen links from queuing up.
   function resolveAndPlay(rec, src) {
     const loading = document.createElement("div");
     loading.className = "empty";
@@ -1129,43 +1566,108 @@
       '</code> with yt-dlp.</small>';
     rec.cell.insertBefore(loading, rec.cell.firstChild);
 
-    return fetch("/api/scan?url=" + encodeURIComponent(src.url))
+    // A retry must bypass the server's resolve cache. Signed CDN links expire
+    // while a wall sits open, and replaying the cached (dead) URL is why
+    // reconnecting used to fail every single time.
+    const fresh = rec._needFresh ? "&fresh=1" : "";
+    rec._needFresh = false;
+    const frame = rec._frameOrigin
+      ? "&origin=" + encodeURIComponent(rec._frameOrigin) : "";
+    return fetch("/api/resolve?scan=1&url=" + encodeURIComponent(src.url) +
+          "&q=" + encodeURIComponent(effectiveQuality(rec)) + fresh + frame)
       .then(r => r.json())
-      .catch(() => null)
-      .then(scan => {
-        if (!players.includes(rec)) { loading.remove(); return; }
-        if (scan && scan.ok && scan.videos && scan.videos.length >= 2) {
-          loading.remove();
+      .then(data => {
+        loading.remove();
+        if (!players.includes(rec)) return; // removed while resolving
+        if (!data.ok) {
+          // The extension watched this tab stream something the server can't
+          // extract (MSE player, JS wall, site yt-dlp doesn't know). Use what
+          // the browser actually saw instead of giving up.
+          if (rec._sniffed && rec._sniffed.length) {
+            const media = rec._sniffed;
+            removePlayer(rec.id);
+            addSniffedMedia(media, src.url, src.title);
+            return;
+          }
+          showError(rec.cell, src.url, data.error, rec);
+          return;
+        }
+
+        if (data.videos && data.videos.length >= 2) {
           removePlayer(rec.id);
-          scan.videos.forEach(v => addPlayer(v.src, null, {
+          data.videos.forEach(v => addPlayer(v.src, null, {
             type: v.isHls ? "hls" : "file",
             url: v.url,
             title: v.title || v.src,
           }));
-          toast("Found " + scan.videos.length + " videos on the page — one tile each.", 4200);
+          toast("Found " + data.videos.length + " videos on the page — one tile each.", 4200);
           return;
         }
-        return fetch("/api/resolve?url=" + encodeURIComponent(src.url) +
-              "&q=" + encodeURIComponent(effectiveQuality(rec)))
-          .then(r => r.json())
-          .then(data => {
-            loading.remove();
-            if (!players.includes(rec)) return; // removed while resolving
-            if (!data.ok) { showError(rec.cell, src.url, data.error); return; }
-            const titleEl = rec.cell.querySelector(".cell-bar .title");
-            if (titleEl && data.title) titleEl.textContent = data.title;
-            rec.media = makeVideo(rec, data.isHls, data.stream);
-            rec.cell.insertBefore(rec.media, rec.cell.querySelector(".cell-bar"));
-          });
+
+        const titleEl = rec.cell.querySelector(".cell-bar .title");
+        if (titleEl && data.title) titleEl.textContent = data.title;
+        rec.media = makeVideo(rec, data.isHls, data.stream);
+        rec.cell.insertBefore(rec.media, rec.cell.querySelector(".cell-bar"));
       })
       .catch(() => {
         loading.remove();
+        if (!players.includes(rec)) return;
         showError(rec.cell, src.url,
-          "Server unavailable. Run 'python server.py' and open http://localhost:8000");
+          "Server unavailable. Run 'python server.py' and open http://localhost:8000",
+          rec);
       });
   }
 
-  function showError(cell, url, detail) {
+  // Works out what actually failed and puts it in the tile.
+  //
+  // Probing only the stream URL was misleading: for HLS that URL is just the
+  // playlist, which usually fetches fine while the segments underneath are the
+  // ones being refused — so the tile cheerfully claimed the stream was OK.
+  // /api/diagnose follows the whole chain (page → playlist → segment) and
+  // names the hop that breaks.
+  function explainFailure(rec, url) {
+    const diagnose = rec.type === "resolve" && rec.raw
+      ? fetch("/api/diagnose?url=" + encodeURIComponent(rec.raw) +
+              "&q=" + encodeURIComponent(effectiveQuality(rec)))
+          .then(r => r.text())
+          .then(t => {
+            const verdict = (t.split(/VERDICT:/)[1] || "").trim().split("\n")
+              .map(s => s.trim()).join(" ");
+            const step = (t.match(/^\s*\d\s\S+\s*:.*<-- refused.*$/m) || [])[0];
+            return [step && step.trim(), verdict].filter(Boolean).join(" — ")
+                   || null;
+          })
+      : Promise.resolve(null);
+
+    diagnose
+      .catch(() => null)
+      .then(reason => {
+        if (!reason && /\/api\/proxy\?/.test(url || "")) {
+          return fetch(url, { headers: { Range: "bytes=0-1" } })
+            .then(res => (res.ok || res.status === 206)
+              ? "the playlist itself loads; its segments are what fail"
+              : (res.headers.get("X-MS-Reason") || ("HTTP " + res.status)))
+            .catch(() => null);
+        }
+        return reason;
+      })
+      .then(reason => {
+        if (!players.includes(rec)) return;
+        // The player's own reason comes first: when the network chain is fine,
+        // this is the only thing that says why the tile still won't play.
+        const parts = [];
+        if (rec._hlsError) parts.push("player: " + rec._hlsError);
+        if (reason) parts.push(reason);
+        if (!parts.length) return;
+        const small = rec.cell.querySelector(".error small");
+        if (small) small.insertAdjacentHTML("afterbegin",
+          "<b>" + escapeHtml(parts.join(" · ")) + "</b><br>");
+      });
+  }
+
+  // Error tile. `rec` (when given) gets a Try again button — most failures
+  // here are transient (expired link, CDN hiccup) and one retry fixes them.
+  function showError(cell, url, detail, rec) {
     if (cell.querySelector(".error")) return;
     const err = document.createElement("div");
     err.className = "empty error";
@@ -1175,6 +1677,18 @@
         : "The video server may block external playback (CORS/hotlinking), " +
           "require DRM, or the link expired.") +
       '<br><code>' + escapeHtml(url) + '</code></small>';
+    if (rec) {
+      const again = document.createElement("button");
+      again.type = "button";
+      again.className = "retry";
+      again.textContent = "↻ Try again";
+      again.addEventListener("click", () => {
+        rec._retries = 0;
+        rec._needFresh = true;
+        reloadPlayer(rec.id);
+      });
+      err.appendChild(again);
+    }
     cell.appendChild(err);
   }
 
@@ -1184,6 +1698,8 @@
     const p = players[idx];
     cancelRecord(p);
     dropPreload(p);
+    clearTimeout(p._steadyTimer);
+    if (visibility) visibility.unobserve(p.cell);
     if (p.media && p.media._hls) p.media._hls.destroy();
     p.cell.remove();
     players.splice(idx, 1);
@@ -1226,16 +1742,51 @@
     ));
   }
 
+  /* ---------- Paste box ---------- */
+
+  const IS_BLOB = /^(?:blob|mediasource):/i;
+
+  // Accepts several URLs at once, separated by spaces or line breaks, and —
+  // the way out when the extension can't see the tab — a blob: URL pasted
+  // NEXT TO the page it came from:
+  //
+  //   blob:https://tubevid.site/f850…  https://thatsite.com/watch/123
+  //
+  // The blob is not a link and never will be, but its origin names the frame
+  // holding the player, which is usually an embed on a different host than the
+  // page. Pass that along and the server knows which <iframe> to open.
+  //
+  // Pairing is per line, so a batch of tabs is one line each. (Not
+  // .forEach(addPlayer): forEach's index/array would land in the
+  // quality/presetSrc parameters and break every player.)
+  function addPasted(text) {
+    String(text).split(/[\r\n]+/).forEach(line => {
+      const parts = line.trim().split(/\s+/).filter(Boolean);
+      if (!parts.length) return;
+      const blobs = parts.filter(p => IS_BLOB.test(p));
+      const links = parts.filter(p => !IS_BLOB.test(p));
+      if (!blobs.length || !links.length) {
+        parts.forEach(u => addPlayer(u));
+        return;
+      }
+      // Equal counts means the line pairs up one-to-one; otherwise every link
+      // on the line gets the first blob's origin as its hint.
+      links.forEach((u, i) => addPlayer(u, null, null, null,
+        blobOrigin(blobs.length === links.length ? blobs[i] : blobs[0])));
+    });
+  }
+
+  function blobOrigin(u) {
+    return (String(u).match(/^(?:blob|mediasource):(https?:\/\/[^/?#]+)/i) || [])[1] || "";
+  }
+
   /* ---------- Events ---------- */
 
   urlForm.addEventListener("submit", (e) => {
     e.preventDefault();
     const val = urlInput.value.trim();
     if (!val) return;
-    // Allows pasting several URLs separated by spaces or line breaks.
-    // (Not .forEach(addPlayer): forEach's index/array would land in the
-    // quality/presetSrc parameters and break every player.)
-    val.split(/[\s\n]+/).filter(Boolean).forEach(u => addPlayer(u));
+    addPasted(val);
     urlInput.value = "";
     urlInput.focus();
   });
@@ -1753,8 +2304,430 @@
     mergeFileInput.value = "";  // allows re-selecting the same files later
   });
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") { closeSaveModal(); closeCompileModal(); }
+    if (e.key === "Escape") { closeSaveModal(); closeCompileModal(); closeTranceModal(); }
   });
+
+  /* ---------- Trance ----------
+
+     A hypnotic audio bed synthesised live (no files, no server) with the
+     user's own phrases spoken over it on a loop. The bed is a pair of
+     oscillators a few Hz apart, so it never has a loop seam, never re-fetches
+     anything, and costs nothing to keep running under a 40-tile wall.
+
+     Defaults are 6 Hz — theta, the rate with the least-thin evidence behind
+     it for calm/focus and the band classically tied to hypnotic states.
+  */
+
+  const TRANCE_KEY = "multiscreen.trance";
+  const TRANCE_WARNED_KEY = "multiscreen.tranceWarned";
+  const TRANCE_CARRIER = 200; // Hz — low enough to sit under the videos
+
+  const trance = {
+    phrases: [],
+    beat: 6,
+    tone: "binaural",
+    noise: "pink",
+    intervalSec: 20,
+    order: "sequential",
+    bedVolume: 0.35,
+    voiceVolume: 1,
+    rate: 0.75,
+    duck: 0.75,      // how far the videos drop while a phrase is spoken
+    lang: "en-US",   // BCP 47 tag the utterances are tagged with
+    voice: "",       // preferred SpeechSynthesis voice name, "" = auto
+  };
+
+  // Default phrase for the ▶ Test button, per language.
+  const TRANCE_SAMPLE = {
+    "en-US": "I am calm, present and in control.",
+    "en-GB": "I am calm, present and in control.",
+    "pt-BR": "Eu estou calmo, presente e no controle.",
+  };
+
+  let tranceOn = false;
+  let actx = null;
+  let bedGain = null;
+  let bedNodes = [];
+  let phraseTimer = null;
+  let phraseIdx = 0;
+  let speakWatchdog = null;
+  let langVoices = [];
+  const duckedVolumes = new Map(); // media element -> volume before ducking
+
+  function tranceLoad() {
+    try {
+      const raw = localStorage.getItem(TRANCE_KEY);
+      if (raw) Object.assign(trance, JSON.parse(raw) || {});
+    } catch (e) { /* private mode or corrupt value: keep the defaults */ }
+    if (!Array.isArray(trance.phrases)) trance.phrases = [];
+  }
+
+  function tranceStore() {
+    try { localStorage.setItem(TRANCE_KEY, JSON.stringify(trance)); }
+    catch (e) { /* nothing to do: settings just won't survive a reload */ }
+  }
+
+  /* --- Synthesis --- */
+
+  // 4 s of looping noise. Pink is the Paul Kellet approximation, brown a leaky
+  // integrator over white — both far easier to sit under for an hour than
+  // white noise, which is all treble.
+  function noiseBuffer(kind) {
+    const len = Math.floor(actx.sampleRate * 4);
+    const buf = actx.createBuffer(1, len, actx.sampleRate);
+    const d = buf.getChannelData(0);
+    let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0, last = 0;
+    for (let i = 0; i < len; i++) {
+      const white = Math.random() * 2 - 1;
+      if (kind === "brown") {
+        last = (last + 0.02 * white) / 1.02;
+        d[i] = last * 3.5;
+      } else {
+        b0 = 0.99886 * b0 + white * 0.0555179;
+        b1 = 0.99332 * b1 + white * 0.0750759;
+        b2 = 0.96900 * b2 + white * 0.1538520;
+        b3 = 0.86650 * b3 + white * 0.3104856;
+        b4 = 0.55000 * b4 + white * 0.5329522;
+        b5 = -0.7616 * b5 - white * 0.0168980;
+        d[i] = (b0 + b1 + b2 + b3 + b4 + b5 + b6 + white * 0.5362) * 0.11;
+        b6 = white * 0.115926;
+      }
+    }
+    return buf;
+  }
+
+  function startBed() {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) { toast("This browser has no Web Audio support — trance needs it."); return false; }
+    actx = new Ctx();
+    bedGain = actx.createGain();
+    bedGain.gain.value = 0.0001;
+    bedGain.connect(actx.destination);
+    const now = actx.currentTime;
+
+    if (trance.tone !== "isochronic") {
+      // Binaural: the beat only exists inside the listener's head, which is
+      // why this one needs headphones — on a speaker the two tones just mix.
+      const merger = actx.createChannelMerger(2);
+      [0, 1].forEach(ch => {
+        const osc = actx.createOscillator();
+        osc.frequency.value = TRANCE_CARRIER + (ch ? trance.beat : 0);
+        const g = actx.createGain();
+        g.gain.value = 0.16;
+        osc.connect(g).connect(merger, 0, ch);
+        osc.start(now);
+        bedNodes.push(osc);
+      });
+      merger.connect(bedGain);
+    }
+
+    if (trance.tone !== "binaural") {
+      // Isochronic: one tone swept in amplitude at the beat rate. Works on
+      // speakers and entrains harder, at the cost of being more intrusive.
+      const osc = actx.createOscillator();
+      osc.frequency.value = TRANCE_CARRIER;
+      const mod = actx.createGain();
+      mod.gain.value = 0.5;            // the LFO swings this between 0 and 1
+      const lfo = actx.createOscillator();
+      lfo.frequency.value = trance.beat;
+      const lfoGain = actx.createGain();
+      lfoGain.gain.value = 0.5;
+      lfo.connect(lfoGain);
+      lfoGain.connect(mod.gain);
+      const level = actx.createGain();
+      level.gain.value = 0.14;
+      osc.connect(mod).connect(level).connect(bedGain);
+      osc.start(now);
+      lfo.start(now);
+      bedNodes.push(osc, lfo);
+    }
+
+    if (trance.noise !== "off") {
+      const src = actx.createBufferSource();
+      src.buffer = noiseBuffer(trance.noise);
+      src.loop = true;
+      const lp = actx.createBiquadFilter();
+      lp.type = "lowpass";
+      lp.frequency.value = 1200;
+      const g = actx.createGain();
+      g.gain.value = 0.5;
+      src.connect(lp).connect(g).connect(bedGain);
+      src.start(now);
+      bedNodes.push(src);
+    }
+
+    // Long fade in: a tone that snaps on is the opposite of what this is for.
+    bedGain.gain.setTargetAtTime(trance.bedVolume, now, 1.5);
+    return true;
+  }
+
+  function stopBed() {
+    if (!actx) return;
+    const ctx = actx, nodes = bedNodes, g = bedGain;
+    actx = null; bedGain = null; bedNodes = [];
+    const now = ctx.currentTime;
+    g.gain.cancelScheduledValues(now);
+    g.gain.setTargetAtTime(0.0001, now, 0.4);
+    // Fade first, tear down after — stopping the oscillators outright clicks.
+    setTimeout(() => {
+      nodes.forEach(n => { try { n.stop(); } catch (e) {} });
+      if (ctx.close) ctx.close().catch(() => {});
+    }, 1800);
+  }
+
+  /* --- Ducking --- */
+
+  // Videos step aside while a phrase is spoken. Routing the tiles through Web
+  // Audio would be cleaner, but createMediaElementSource silently mutes
+  // cross-origin media and this wall is full of it — so ramp .volume instead.
+  // Only direct <video> tiles follow; YouTube/Vimeo iframes have their own.
+  function rampVolume(el, target, ms) {
+    if (el._volTimer) clearInterval(el._volTimer);
+    const from = el.volume;
+    const steps = Math.max(1, Math.round(ms / 40));
+    let i = 0;
+    el._volTimer = setInterval(() => {
+      i++;
+      const v = from + (target - from) * (i / steps);
+      try { el.volume = Math.min(1, Math.max(0, v)); } catch (e) {}
+      if (i >= steps) { clearInterval(el._volTimer); el._volTimer = null; }
+    }, 40);
+  }
+
+  function duckVideos(on) {
+    if (on) {
+      players.forEach(p => {
+        const v = p.media;
+        if (!v || v.tagName !== "VIDEO") return;
+        if (!duckedVolumes.has(v)) duckedVolumes.set(v, v.volume);
+        rampVolume(v, duckedVolumes.get(v) * (1 - trance.duck), 250);
+      });
+      return;
+    }
+    duckedVolumes.forEach((vol, v) => rampVolume(v, vol, 600));
+    duckedVolumes.clear();
+  }
+
+  /* --- Voice --- */
+
+  // Chrome's better voices are network-backed and register late, so this runs
+  // again on `voiceschanged` — and on every language change.
+  function refreshVoices() {
+    if (!window.speechSynthesis) return;
+    const all = speechSynthesis.getVoices() || [];
+    const want = trance.lang.toLowerCase();
+    const base = want.split("-")[0];
+    const tagOf = v => (v.lang || "").replace("_", "-").toLowerCase();
+    // Exact region first (en-US before en-GB), then anything in the same
+    // language, then — if the machine has neither — everything installed.
+    const exact = all.filter(v => tagOf(v) === want);
+    const sameLang = all.filter(v => tagOf(v).split("-")[0] === base && exact.indexOf(v) < 0);
+    langVoices = exact.concat(sameLang);
+    const list = langVoices.length ? langVoices : all;
+    tranceVoice.innerHTML = "";
+    const auto = document.createElement("option");
+    auto.value = "";
+    auto.textContent = langVoices.length
+      ? "Auto (" + trance.lang + ")"
+      : "Auto (no " + trance.lang + " voice installed)";
+    tranceVoice.appendChild(auto);
+    list.forEach(v => {
+      const o = document.createElement("option");
+      o.value = v.name;
+      o.textContent = v.name + " · " + v.lang + (v.localService ? "" : " · online");
+      tranceVoice.appendChild(o);
+    });
+    tranceVoice.value = trance.voice || "";
+    if (tranceVoice.value !== (trance.voice || "")) tranceVoice.value = "";
+  }
+
+  function speakPhrase(text, onDone) {
+    if (!window.speechSynthesis || !text) { onDone(); return; }
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = trance.lang;
+    u.rate = trance.rate;
+    u.pitch = 0.9;   // a touch lower reads as calmer
+    u.volume = trance.voiceVolume;
+    const v = langVoices.find(x => x.name === trance.voice);
+    if (v) u.voice = v;
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(speakWatchdog);
+      onDone();
+    };
+    u.onend = finish;
+    u.onerror = finish;
+    // Chrome drops utterances often enough that without a watchdog the loop
+    // would just stop one evening and never speak again.
+    const est = (text.length / 9) / Math.max(0.4, trance.rate) + 6;
+    speakWatchdog = setTimeout(finish, est * 1000);
+    speechSynthesis.speak(u);
+  }
+
+  function nextPhrase() {
+    if (!trance.phrases.length) return "";
+    if (trance.order === "random") {
+      return trance.phrases[Math.floor(Math.random() * trance.phrases.length)];
+    }
+    const t = trance.phrases[phraseIdx % trance.phrases.length];
+    phraseIdx++;
+    return t;
+  }
+
+  function scheduleNextPhrase(delayMs) {
+    clearTimeout(phraseTimer);
+    phraseTimer = setTimeout(() => {
+      if (!tranceOn) return;
+      const text = nextPhrase();
+      if (!text) { scheduleNextPhrase(trance.intervalSec * 1000); return; }
+      duckVideos(true);
+      speakPhrase(text, () => {
+        duckVideos(false);
+        if (tranceOn) scheduleNextPhrase(trance.intervalSec * 1000);
+      });
+    }, delayMs);
+  }
+
+  /* --- Start / stop --- */
+
+  function startTrance() {
+    if (tranceOn) stopTrance();
+    if (!startBed()) { tranceToggle.checked = false; return; }
+    tranceOn = true;
+    tranceToggle.checked = true;
+    phraseIdx = 0;
+    // Settle into the bed before the first phrase lands.
+    scheduleNextPhrase(Math.max(8000, trance.intervalSec * 1000));
+    toast(trance.tone === "isochronic"
+      ? "🌀 Trance on."
+      : "🌀 Trance on — use headphones, a binaural beat needs both ears.", 4200);
+  }
+
+  function stopTrance() {
+    tranceOn = false;
+    clearTimeout(phraseTimer);
+    clearTimeout(speakWatchdog);
+    if (window.speechSynthesis) speechSynthesis.cancel();
+    duckVideos(false);
+    stopBed();
+    tranceToggle.checked = false;
+  }
+
+  /* --- Modal --- */
+
+  function fillTranceForm() {
+    trancePhrases.value = trance.phrases.join("\n");
+    tranceBeat.value = String(trance.beat);
+    tranceTone.value = trance.tone;
+    tranceNoise.value = trance.noise;
+    tranceLang.value = trance.lang;
+    if (!tranceLang.value) { tranceLang.value = "en-US"; trance.lang = "en-US"; }
+    tranceOrder.value = trance.order;
+    tranceInterval.value = String(trance.intervalSec);
+    tranceBedVol.value = String(Math.round(trance.bedVolume * 100));
+    tranceVoiceVol.value = String(Math.round(trance.voiceVolume * 100));
+    tranceRate.value = String(Math.round(trance.rate * 100));
+    tranceDuck.value = String(Math.round(trance.duck * 100));
+    refreshVoices();
+    syncTranceLabels();
+  }
+
+  function syncTranceLabels() {
+    document.getElementById("tranceBedVolVal").textContent = tranceBedVol.value + "%";
+    document.getElementById("tranceVoiceVolVal").textContent = tranceVoiceVol.value + "%";
+    document.getElementById("tranceRateVal").textContent = (tranceRate.value / 100).toFixed(2) + "×";
+    document.getElementById("tranceDuckVal").textContent = tranceDuck.value + "%";
+  }
+
+  function readTranceForm() {
+    trance.phrases = trancePhrases.value.split("\n").map(s => s.trim()).filter(Boolean);
+    trance.beat = parseFloat(tranceBeat.value) || 6;
+    trance.tone = tranceTone.value;
+    trance.noise = tranceNoise.value;
+    trance.order = tranceOrder.value;
+    trance.lang = tranceLang.value || "en-US";
+    trance.voice = tranceVoice.value || "";
+    trance.intervalSec = Math.min(300, Math.max(5, parseInt(tranceInterval.value, 10) || 20));
+    trance.bedVolume = (parseInt(tranceBedVol.value, 10) || 0) / 100;
+    trance.voiceVolume = (parseInt(tranceVoiceVol.value, 10) || 0) / 100;
+    trance.rate = (parseInt(tranceRate.value, 10) || 75) / 100;
+    trance.duck = (parseInt(tranceDuck.value, 10) || 0) / 100;
+    tranceStore();
+  }
+
+  function openTranceModal() {
+    fillTranceForm();
+    tranceStart.textContent = tranceOn ? "🌀 Apply" : "🌀 Start";
+    tranceModal.classList.add("open");
+  }
+
+  function closeTranceModal() {
+    if (!tranceModal.classList.contains("open")) return;
+    readTranceForm();
+    tranceModal.classList.remove("open");
+  }
+
+  tranceBtn.addEventListener("click", openTranceModal);
+
+  tranceToggle.addEventListener("click", (e) => {
+    if (!tranceToggle.checked) { stopTrance(); return; }
+    // First ever activation goes through the modal, so the safety note and
+    // the phrase box are seen at least once before any tone plays.
+    let warned = false;
+    try { warned = localStorage.getItem(TRANCE_WARNED_KEY) === "1"; } catch (err) {}
+    if (!warned) {
+      e.preventDefault();
+      tranceToggle.checked = false;
+      openTranceModal();
+      return;
+    }
+    startTrance();
+  });
+
+  [tranceBedVol, tranceVoiceVol, tranceRate, tranceDuck].forEach(el => {
+    el.addEventListener("input", () => {
+      syncTranceLabels();
+      // Bed volume is the one worth hearing live while you drag it.
+      if (el === tranceBedVol && bedGain && actx) {
+        bedGain.gain.setTargetAtTime((parseInt(el.value, 10) || 0) / 100, actx.currentTime, 0.15);
+      }
+    });
+  });
+
+  // Switching language re-filters the voice list; the old pick rarely survives.
+  tranceLang.addEventListener("change", () => {
+    trance.lang = tranceLang.value || "en-US";
+    trance.voice = "";
+    refreshVoices();
+  });
+
+  tranceTest.addEventListener("click", () => {
+    readTranceForm();
+    const text = trance.phrases[0] || TRANCE_SAMPLE[trance.lang] || TRANCE_SAMPLE["en-US"];
+    if (window.speechSynthesis) speechSynthesis.cancel();
+    speakPhrase(text, () => {});
+  });
+
+  tranceCancel.addEventListener("click", closeTranceModal);
+
+  tranceStart.addEventListener("click", () => {
+    readTranceForm();
+    try { localStorage.setItem(TRANCE_WARNED_KEY, "1"); } catch (e) {}
+    tranceModal.classList.remove("open");
+    startTrance();
+  });
+
+  tranceModal.addEventListener("click", (e) => {
+    if (e.target === tranceModal) closeTranceModal();
+  });
+
+  if (window.speechSynthesis) {
+    speechSynthesis.addEventListener("voiceschanged", refreshVoices);
+  }
+  tranceLoad();
+  fillTranceForm();
 
   /* ---------- Compilation ---------- */
 
@@ -2098,26 +3071,117 @@
   window.addEventListener("message", (e) => {
     const d = e.data;
     if (e.source !== window || !d || d.source !== "multiscreen-ext") return;
+    extPresent = true; // any message at all means the bridge is installed
     if (d.type === "tabs") {
       clearTimeout(tabsRequestTimer);
       tabsRequestTimer = null;
-      addTabUrls((d.tabs || []).map(t => t && t.url));
+      addTabUrls(d.tabs || []);
+    } else if (d.type === "media") {
+      const waiter = blobWaiters.get(d.origin);
+      if (!waiter) return; // not ours, or already served
+      clearTimeout(waiter.timer);
+      blobWaiters.delete(d.origin);
+      if (!d.media || !d.media.length) {
+        // Say what the extension actually saw — "it didn't work" is useless
+        // when the fix is usually just reloading the tab it should watch.
+        toast("The extension is running but has no stream for " + d.origin +
+          (d.reason ? " (" + d.reason + ")" : "") + ". It only sees what a tab " +
+          "loads while it is installed, so reload that tab and press play " +
+          "once. " + BLOB_HELP, 11000);
+        return;
+      }
+      addSniffedMedia(d.media, d.pageUrl || d.origin, d.title);
+      toast(d.guess
+        ? "No exact match for that blob:, but one tab is streaming — using it."
+        : "Found the stream behind that blob: player.", 3600);
     }
   });
 
-  // Adds a batch of tab URLs, skipping ones already on the wall.
-  function addTabUrls(urls) {
+  // content.js announces itself at document_start, but that message can be
+  // dispatched before this script has even parsed — the ping is what actually
+  // settles whether the bridge is there.
+  window.postMessage({ source: "multiscreen-page", type: "ping" }, "*");
+
+  /* ---------- blob: URLs ---------- */
+
+  const BLOB_HELP =
+    "Paste the blob: and the page address together on one line — " +
+    "“blob:https://host/uuid  https://thesite.com/watch/123” — and the " +
+    "server goes after the player itself, iframe included.";
+
+  const blobWaiters = new Map(); // origin -> { timer }
+  let extPresent = false;
+
+  // Last chance for a pasted blob: URL. All it carries is the origin of the
+  // frame that created it, so ask the extension which stream a tab on that
+  // origin is really playing.
+  //
+  // The wait is generous on purpose: the answer means waking an idle service
+  // worker, reading session storage and querying every tab, which is well
+  // over a second on a cold start. The first version gave it 900ms, and the
+  // real answer kept arriving after the app had already given up on it.
+  function recoverBlob(src) {
+    if (blobWaiters.has(src.origin)) return; // already asking
+    blobWaiters.set(src.origin, {
+      timer: setTimeout(() => {
+        blobWaiters.delete(src.origin);
+        toast(extPresent
+          ? "The MultiScreen Tabs extension didn't answer in time. Try again — " +
+            "it wakes up on the first request. " + BLOB_HELP
+          : "That's a blob: URL: a handle to the video inside that one tab, " +
+            "not a link anything else can open. " + BLOB_HELP, 10000);
+      }, 5000),
+    });
+    window.postMessage(
+      { source: "multiscreen-page", type: "find-media", origin: src.origin }, "*");
+    toast("blob: link — asking the extension which stream that tab is playing…", 4000);
+  }
+
+  // Turns a stream the browser sniffed into a tile. These URLs live on the
+  // site's CDN, which won't serve them to localhost, so the proxy has to
+  // re-send them with the page's Referer — /api/wrap only mints that token,
+  // it downloads nothing.
+  function addSniffedMedia(media, pageUrl, title) {
+    const list = (Array.isArray(media) ? media : [media]).filter(Boolean);
+    const hls = list.find(u => /\.m3u8(\?|#|$)/i.test(u));
+    const file = list.find(u => /\.(mp4|webm|m4v|mov|ogv)(\?|#|$)/i.test(u));
+    const pick = hls || file || list[0];
+    if (!pick) return;
+    // No dash.js here, so a DASH manifest can't go straight into a <video>;
+    // yt-dlp reads those fine, so let the server have it.
+    if (!hls && !file) { addPlayer(pick); return; }
+
+    fetch("/api/wrap?url=" + encodeURIComponent(pick) +
+          "&ref=" + encodeURIComponent(pageUrl || "") +
+          "&title=" + encodeURIComponent(title || ""))
+      .then(r => r.json())
+      .then(d => {
+        if (!d.ok) { toast("Couldn't use that stream: " + (d.error || "unknown")); return; }
+        addPlayer(pick, null, {
+          type: d.isHls ? "hls" : "file",
+          url: d.url,
+          title: d.title || pick,
+        });
+      })
+      .catch(() => toast(
+        "Server unavailable. Run 'python server.py' and open http://localhost:8000"));
+  }
+
+  // Adds a batch of tabs, skipping ones already on the wall. Accepts plain
+  // URLs or {url, title, media} objects from the extension.
+  function addTabUrls(items) {
     const existing = new Set(players.map(p => p.raw.trim()));
     const fresh = [];
-    (urls || []).forEach(u => {
-      u = String(u || "").trim();
-      if (u && !existing.has(u)) { existing.add(u); fresh.push(u); }
+    (items || []).forEach(it => {
+      const tab = typeof it === "string" ? { url: it } : (it || {});
+      const u = String(tab.url || "").trim();
+      if (u && !existing.has(u)) { existing.add(u); fresh.push({ ...tab, url: u }); }
     });
     if (!fresh.length) {
       toast("No new tabs to add — everything is already on the wall.");
       return;
     }
-    fresh.forEach(u => addPlayer(u));
+    fresh.forEach(t => addPlayer(t.url, null, null, t.media));
     toast("Adding " + fresh.length + " tab" + (fresh.length === 1 ? "" : "s") +
       "… Tiles that aren't videos will show an error — just close them.", 4200);
   }
