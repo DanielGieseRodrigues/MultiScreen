@@ -323,6 +323,81 @@
   .modal input[type="text"] { flex: none; width: 100%; }
   .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
+  /* The Pack button doubles as the minimized build: fixed width and tabular
+     digits so a percentage ticking five times a second never reflows the
+     toolbar over a playing wall, and the fill shows progress without having to
+     reopen anything. */
+  #packBtn.packing {
+    min-width: 104px;
+    font-variant-numeric: tabular-nums;
+    border-color: var(--accent);
+    background-image: linear-gradient(90deg,
+      rgba(79, 140, 255, .38) var(--p, 0%), transparent var(--p, 0%));
+  }
+
+  /* Pack modal */
+  .pack-summary { display: flex; flex-direction: column; gap: 6px; }
+  .pack-stats { font-size: 12px; color: var(--muted); }
+  .pack-list {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 300px;
+    overflow-y: auto;
+  }
+  .pack-row {
+    display: grid;
+    grid-template-columns: 24px 1fr auto;
+    gap: 4px 8px;
+    align-items: center;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 7px 9px;
+    font-size: 13px;
+  }
+  .pack-row .idx { color: var(--muted); font-size: 11px; text-align: right; }
+  .pack-row .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pack-row .state {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .4px;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  .pack-row.active { border-color: var(--accent); }
+  .pack-row.done .state { color: #57d68a; }
+  .pack-row.failed .state { color: var(--danger); }
+  .pack-row.skipped .state,
+  .pack-row.cancelled .state { color: #d6a457; }
+  .pack-row .bar {
+    grid-column: 1 / -1;
+    height: 3px;
+    background: var(--border);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .pack-row .bar > i {
+    display: block;
+    height: 100%;
+    width: 0;
+    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  }
+
+  .pack-opts { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px 16px; }
+  .pack-opts .field { display: flex; flex-direction: column; gap: 4px; }
+  .pack-opts .field > span {
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .6px;
+  }
+  .pack-check { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+  .pack-check input { margin: 0; }
+  .pack-hint { flex: 1 1 100%; font-size: 12px; color: var(--muted); }
+
   /* Trance modal */
   .trance-grid { display: flex; flex-wrap: wrap; gap: 10px; }
   .trance-grid .field { display: flex; flex-direction: column; gap: 4px; flex: 1 1 150px; }
@@ -365,6 +440,8 @@
   .trance-range { display: flex; align-items: center; gap: 8px; }
   .trance-range input[type="range"] { flex: 1; min-width: 0; accent-color: var(--accent); cursor: pointer; }
   .trance-range b { font-size: 12px; font-weight: 600; min-width: 36px; text-align: right; }
+  .trance-hint { font-size: 12px; line-height: 1.5; color: var(--muted); }
+  .trance-hint:empty { display: none; }
   .trance-warn {
     font-size: 12px;
     line-height: 1.6;
@@ -520,6 +597,7 @@
       <button type="button" id="localBtn" title="Add a video file from your computer">📁 Local</button>
       <input type="file" id="localFileInput" accept="video/*" multiple hidden>
       <button type="button" id="tabsBtn" title="Add every open browser tab (needs the MultiScreen Tabs extension)">🗂 Tabs</button>
+      <button type="button" id="relatedBtn" title="Add one more video like the ones already up: mines the pages these tiles came from and picks the closest match by title">🔗 Related</button>
     </form>
     <div class="controls">
       <label for="layoutSelect">Layout</label>
@@ -591,6 +669,51 @@
     </div>
   </div>
 
+  <!-- Modal: pack -->
+  <div class="modal-backdrop" id="packModal">
+    <div class="modal wide">
+      <h3>📦 Pack</h3>
+      <div class="modal-sub">
+        Downloads every tile into one .zip you can reload later with zero re-fetching.
+        Tiles are fetched in parallel, and whatever already came down is kept — build
+        again — even after a reload — and only the missing tiles are fetched. Size is never a reason to refuse
+        a file; oversized ones are just flagged.
+      </div>
+      <form id="packForm">
+        <input type="text" id="packName" placeholder="Package name" autocomplete="off">
+      </form>
+      <div class="pack-opts">
+        <label class="field">
+          <span>Tile size · re-encode</span>
+          <select id="packSize">
+            <option value="auto">Auto — fit this wall</option>
+            <option value="360">360p</option>
+            <option value="432">432p</option>
+            <option value="540">540p</option>
+            <option value="720">720p</option>
+            <option value="1080">1080p</option>
+            <option value="0">Original — no re-encode</option>
+          </select>
+        </label>
+        <label class="pack-check" title="A package restored at tile size is what stops a big wall from freezing: the videos are re-encoded once, locally, instead of every 4K frame being decoded and thrown away 60 times a second.">
+          <input type="checkbox" id="packShrinkOnLoad" checked>
+          <span>Shrink heavy videos when loading a package</span>
+        </label>
+        <div class="pack-hint" id="packSizeHint"></div>
+      </div>
+      <div class="pack-summary">
+        <div class="progress-track"><div class="progress-fill" id="packFill"></div></div>
+        <div class="pack-stats" id="packStats">Ready.</div>
+      </div>
+      <ul class="pack-list" id="packList"></ul>
+      <div class="modal-actions">
+        <button type="button" id="packReset" title="Forget every download kept on disk and in memory">↺ Reset</button>
+        <button type="button" id="packCancelBtn">Close</button>
+        <button type="button" id="packGo" class="primary">📦 Build .zip</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Modal: trance -->
   <div class="modal-backdrop" id="tranceModal">
     <div class="modal wide">
@@ -640,6 +763,14 @@
           </select>
         </label>
         <label class="field">
+          <span>Voice gender</span>
+          <select id="tranceGender">
+            <option value="female">Female</option>
+            <option value="male">Male</option>
+            <option value="any">Any</option>
+          </select>
+        </label>
+        <label class="field">
           <span>Voice</span>
           <select id="tranceVoice"></select>
         </label>
@@ -655,6 +786,8 @@
           </select>
         </label>
       </div>
+
+      <div class="trance-hint" id="tranceVoiceHint"></div>
 
       <div class="trance-grid">
         <label class="field">
@@ -777,6 +910,18 @@
   const saveBtn = document.getElementById("saveBtn");
   const loadBtn = document.getElementById("loadBtn");
   const packBtn = document.getElementById("packBtn");
+  const packModal = document.getElementById("packModal");
+  const packForm = document.getElementById("packForm");
+  const packName = document.getElementById("packName");
+  const packFill = document.getElementById("packFill");
+  const packStats = document.getElementById("packStats");
+  const packListEl = document.getElementById("packList");
+  const packCancelBtn = document.getElementById("packCancelBtn");
+  const packReset = document.getElementById("packReset");
+  const packGo = document.getElementById("packGo");
+  const packSize = document.getElementById("packSize");
+  const packSizeHint = document.getElementById("packSizeHint");
+  const packShrinkOnLoad = document.getElementById("packShrinkOnLoad");
   const mergeBtn = document.getElementById("mergeBtn");
   const mergeFileInput = document.getElementById("mergeFileInput");
   const clearBtn = document.getElementById("clearBtn");
@@ -806,6 +951,7 @@
   const localBtn = document.getElementById("localBtn");
   const localFileInput = document.getElementById("localFileInput");
   const tabsBtn = document.getElementById("tabsBtn");
+  const relatedBtn = document.getElementById("relatedBtn");
   const tranceToggle = document.getElementById("tranceToggle");
   const tranceBtn = document.getElementById("tranceBtn");
   const tranceModal = document.getElementById("tranceModal");
@@ -814,7 +960,9 @@
   const tranceTone = document.getElementById("tranceTone");
   const tranceNoise = document.getElementById("tranceNoise");
   const tranceLang = document.getElementById("tranceLang");
+  const tranceGender = document.getElementById("tranceGender");
   const tranceVoice = document.getElementById("tranceVoice");
+  const tranceVoiceHint = document.getElementById("tranceVoiceHint");
   const tranceInterval = document.getElementById("tranceInterval");
   const tranceOrder = document.getElementById("tranceOrder");
   const tranceBedVol = document.getElementById("tranceBedVol");
@@ -836,7 +984,10 @@
   // what causes the stutter. So each short file is downloaded ONCE into a
   // Blob and the <video> is switched to it — after that the loop is 100%
   // local (no network, no server). Caps keep memory sane on big walls.
-  const PRELOAD_MAX_BYTES = 80 * 1024 * 1024;      // per video
+  // Playback caching still needs a ceiling — this one guards the wall's own
+  // memory, and PRELOAD_BUDGET_BYTES caps the sum across every tile anyway.
+  // Pack does NOT use these: it never refuses a file for being large.
+  const PRELOAD_MAX_BYTES = 240 * 1024 * 1024;     // per video
   const PRELOAD_BUDGET_BYTES = 1024 * 1024 * 1024; // across all tiles
   let preloadBytesUsed = 0;
 
@@ -1039,9 +1190,11 @@
 
     grid.appendChild(cell);
     if (visibility) visibility.observe(cell);
+    watchGestures(rec);
 
     rec.bar = bar;
     players.push(rec);
+    if (src.type === "resolve") rememberPage(raw);
     updateLayout();
     mountMedia(rec, src);
   }
@@ -1116,22 +1269,115 @@
   // paused <video> costs nothing to decode.
   const visibility = ("IntersectionObserver" in window)
     ? new IntersectionObserver((entries) => {
-        if (!wallMode()) return;
         entries.forEach(en => {
           const rec = players.find(p => p.cell === en.target);
           if (!rec || !rec.media || rec.media.tagName !== "VIDEO") return;
-          if (en.isIntersecting) {
+          // Below wall size everything plays, in view or not. `_offscreen` is
+          // what tells the watchdog to leave a parked tile parked — without it
+          // the two would fight over every tile out of view.
+          rec._offscreen = wallMode() && !en.isIntersecting;
+          if (!rec._offscreen) {
             if (rec._autoPaused) {
               rec._autoPaused = false;
-              rec.media.play().catch(() => {});
+              rec.media.play().catch(() => {});  // watchdog retries a refusal
             }
           } else if (!rec.media.paused) {
-            rec._autoPaused = true; // only resume what WE paused
+            rec._autoPaused = true;
             rec.media.pause();
           }
         });
       }, { threshold: 0.05 })
     : null;
+
+  /* ---------- Playback watchdog ----------
+
+     A <video> can stop on its own and never come back. The common one here is
+     the Blob swap: setting .src runs the load algorithm, which pauses the
+     element, and the play() that follows is rejected with AbortError ("request
+     interrupted by a new load request") — swallowed, leaving the tile frozen.
+     Chrome also suspends players under memory pressure, and a decode hiccup
+     pauses the element outright. Nothing in the app resumed any of it: the
+     off-screen pauser only resumed what it had paused itself, so every other
+     stall waited for a human to click play. On a 48-tile wall that is constant
+     manual repair.
+
+     So intent is tracked instead of state: a tile the user did not pause is
+     supposed to be playing, and the watchdog puts it back. The one thing it
+     must never override is a deliberate pause — so a pause landing right after
+     a gesture inside that tile is read as the user's and left alone.
+  */
+
+  const WATCHDOG_MS = 2000;
+  const GESTURE_GRACE_MS = 800;   // a pause this soon after a click is the user's
+  const FROZEN_MS = 8000;         // not paused, but currentTime hasn't moved
+  const MAX_NUDGES = 3;           // then reload the tile instead of nudging again
+
+  // Stamps the tile on any pointer/key interaction, so the `pause` that
+  // follows can be attributed to the user. The native controls live in the
+  // video's shadow DOM, so their clicks retarget to the element itself and
+  // this listener on the cell sees them.
+  function watchGestures(rec) {
+    const stamp = () => { rec._gestureAt = Date.now(); };
+    rec.cell.addEventListener("pointerdown", stamp, true);
+    rec.cell.addEventListener("keydown", stamp, true);
+  }
+
+  // Wires one <video> into the intent model. Tiles start with autoplay on, so
+  // "playing" is the intent until the user says otherwise.
+  function watchPlayback(rec, video) {
+    rec._wantPlay = true;
+    video.addEventListener("play", () => { rec._wantPlay = true; });
+    video.addEventListener("pause", () => {
+      // A video that ran to the end with loop off is a legitimate stop.
+      if (video.ended && !video.loop) { rec._wantPlay = false; return; }
+      if (Date.now() - (rec._gestureAt || 0) < GESTURE_GRACE_MS) {
+        rec._wantPlay = false;
+      }
+    });
+  }
+
+  function watchdogTick() {
+    const now = Date.now();
+    players.forEach(rec => {
+      const v = rec.media;
+      if (!v || v.tagName !== "VIDEO") return;
+      // Not ours to resume: the user paused it, it's parked off-screen on a
+      // big wall, or a reload is already on the clock.
+      if (!rec._wantPlay || rec._offscreen || rec._retryPending) return;
+
+      if (v.paused) {
+        if (v.ended && !v.loop) return;
+        // A refusal (autoplay policy, a load still settling) costs nothing:
+        // the next tick tries again, and the user's next click unblocks it.
+        v.play().catch(() => {});
+        return;
+      }
+
+      // Playing — but is the clock actually moving? Buffering looks identical
+      // from the outside, so only a long standstill counts.
+      if (v.currentTime !== rec._lastTime) {
+        rec._lastTime = v.currentTime;
+        rec._lastMoveAt = now;
+        rec._nudges = 0;
+        return;
+      }
+      if (!rec._lastMoveAt) { rec._lastMoveAt = now; return; }
+      if (now - rec._lastMoveAt < FROZEN_MS) return;
+
+      rec._lastMoveAt = now;
+      rec._nudges = (rec._nudges || 0) + 1;
+      if (rec._nudges <= MAX_NUDGES) {
+        // A tiny seek re-arms the decoder without moving the picture.
+        try { v.currentTime = v.currentTime + 0.001; } catch (e) {}
+        v.play().catch(() => {});
+      } else {
+        rec._nudges = 0;
+        reloadPlayer(rec.id);
+      }
+    });
+  }
+
+  setInterval(watchdogTick, WATCHDOG_MS);
 
   // Change a single video's quality and re-resolve it in place.
   function setPlayerQuality(id, value) {
@@ -1286,6 +1532,7 @@
         if (!useHls) preloadFullVideo(rec, video, url);
       }
     }
+    watchPlayback(rec, video);
     video.addEventListener("error", () => failOrRetry(rec, url));
     // Forget earlier failures so a tile that hiccups once an hour keeps its
     // full retry budget instead of slowly using it up. It has to *stay*
@@ -1415,6 +1662,9 @@
           video.currentTime = Math.min(t, Math.max(0, video.duration - 0.05));
         }
       } catch (e) {}
+      // A rejection here (AbortError while the fresh load settles) used to be
+      // where tiles went to die. Intent is already "playing", so the watchdog
+      // picks it up within a tick.
       if (!wasPaused) video.play().catch(() => {});
     }, { once: true });
   }
@@ -1432,6 +1682,10 @@
   function dropPreload(rec) {
     if (rec._preloadAbort) { rec._preloadAbort.abort(); rec._preloadAbort = null; }
     rec._preloading = false;
+    // NOTE: Pack's cache is deliberately untouched here. This runs on every
+    // re-resolve of an expired stream URL too, and the video behind that URL
+    // is the same one — Pack keys its cache on the tile's ORIGINAL url for
+    // exactly that reason.
     // Any queued entry for this tile is now stale; pumpPreloads skips it
     // (its `media` no longer matches) and this lets the tile queue again.
     rec._preloadQueued = false;
@@ -1873,6 +2127,113 @@
     return name.replace(/[\\/:*?"<>|]+/g, "_").replace(/\s+/g, " ").trim() || "multiscreen";
   }
 
+  /* ---------- Related ----------
+
+     Nobody exposes a cross-site "related videos" API, so the wall is the
+     query. Every watch page already links to that site's own recommendations,
+     and the server keeps the links whose URL has the same shape as the page it
+     found them on (/video/<digits>/<slug>/ and not /tags/<name>/) — that tells
+     a video page from a category page without knowing the site. The candidates
+     are then ranked by how many words they share with the titles already up.
+
+     Seeds are the pages the current tiles came from. Only when none of them
+     can be mined — a wall of local files, direct links or embeds — does it
+     fall back to the pages used before, so "Related" stays related to what is
+     on screen instead of drifting into last week's session.
+  */
+
+  const PAGES_KEY = "multiscreen.pages";
+  const PAGES_MAX = 120;
+
+  // The page a tile came from, or "" when there is nothing to mine: a direct
+  // media file has no page, and a local file's address is our own server.
+  function pageUrlOf(p) {
+    const raw = ((p && p.raw) || "").trim();
+    if (!/^https?:\/\//i.test(raw)) return "";
+    if (raw.toLowerCase().startsWith(location.origin.toLowerCase())) return "";
+    if (/\.(mp4|webm|m3u8|mov|mkv|m4v|ogv|ts|mpd)(\?|$)/i.test(raw)) return "";
+    return raw;
+  }
+
+  function recentPages() {
+    try {
+      const list = JSON.parse(localStorage.getItem(PAGES_KEY) || "[]");
+      return Array.isArray(list) ? list.filter(u => typeof u === "string") : [];
+    } catch (e) { return []; }
+  }
+
+  // Every page-backed tile ever added, newest first. This is the "sites you
+  // already use" fallback, and it costs one small write per added tile.
+  function rememberPage(url) {
+    if (!url) return;
+    try {
+      const list = recentPages().filter(u => u !== url);
+      list.unshift(url);
+      localStorage.setItem(PAGES_KEY, JSON.stringify(list.slice(0, PAGES_MAX)));
+    } catch (e) {}
+  }
+
+  function tileTitles() {
+    return players.map(p => {
+      const el = p.bar && p.bar.querySelector(".title");
+      return el ? el.textContent.trim() : "";
+    }).filter(Boolean);
+  }
+
+  async function addRelatedTile() {
+    const onWall = [...new Set(players.map(pageUrlOf).filter(Boolean))];
+    const seeds = onWall.length ? onWall : recentPages();
+    if (!seeds.length) {
+      toast("Related has nothing to go on yet — add a video by its site URL " +
+            "first (a direct .mp4, a local file or an embed has no page to " +
+            "look at).", 5500);
+      return;
+    }
+
+    // Everything already up, so a suggestion is never something on screen.
+    const have = [];
+    players.forEach(p => {
+      if (p.raw) have.push(p.raw);
+      if (p.url) have.push(p.url);
+    });
+
+    const label = relatedBtn.textContent;
+    relatedBtn.disabled = true;
+    relatedBtn.textContent = "🔗 …";
+    try {
+      const res = await apiJson("/api/related", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ seeds, have, titles: tileTitles(), want: 5 }),
+      });
+
+      if (!res || !res.ok) {
+        toast("Related: " + ((res && res.error) || "the server didn't answer."), 6000);
+        return;
+      }
+      if (!res.items.length) {
+        toast(res.error ? "Related: " + res.error
+          : "Nothing new on the pages these tiles came from — the ones they " +
+            "recommend are already up. Add a tile from another video and try again.",
+          6000);
+        return;
+      }
+      const pick = res.items[0];
+      addPlayer(pick.url);
+      // The reason is the point: "filed under tag \"Shadowheart\"" says the
+      // site itself agrees, "shares orin, bhaal" says it was inferred.
+      toast("🔗 " + (pick.title || pick.url) + " · " + (pick.reason || "match") +
+            (onWall.length ? "" : " · from a site you used before"), 5200);
+    } catch (e) {
+      toast("Related failed: " + ((e && e.message) || e), 5000);
+    } finally {
+      relatedBtn.disabled = false;
+      relatedBtn.textContent = label;
+    }
+  }
+
+  relatedBtn.addEventListener("click", addRelatedTile);
+
   // Save = generate and download a .multiscreen.json file with this session.
   function doSave() {
     const name = saveName.value.trim();
@@ -1950,6 +2311,168 @@
     reader.readAsText(file);
   }
 
+  /* Every /api endpoint answers JSON, so an HTML body means the request never
+     reached a handler. Nearly always that is a server started before the
+     endpoint existed: server.py is read once, at startup, while index.html is
+     re-read on every load — so the page in the browser can be newer than the
+     process serving it. Saying that beats letting JSON.parse report
+     "unexpected token <", which describes the symptom and hides the cause. */
+  async function apiJson(path, init) {
+    const res = await fetch(path, init);
+    const body = await res.text();
+    try {
+      return JSON.parse(body);
+    } catch (e) {
+      const name = path.split("?")[0];
+      if (res.status === 404) {
+        throw new Error("this server has no " + name + " — it was started " +
+          "before that feature existed. Restart it (close the console window " +
+          "and run iniciar.bat again) and the wall comes back as it was.");
+      }
+      throw new Error("HTTP " + res.status + " from " + name +
+                      ", and the answer wasn't JSON: " + body.slice(0, 120));
+    }
+  }
+
+  /* ---------- Shrink: re-encode each video to the size its tile shows ------
+
+     Packing the videos locally fixed the network (no re-resolve, no dead
+     links, no proxy) but not the freezing, because the freezing was never
+     about bytes — it is decode. A 4K60 tile is ~500 Mpixel/s of decoding, a
+     3060 has ONE NVDEC engine that saturates around two of those, and every
+     decoded frame is then thrown away by the scaler on its way into a ~400px
+     cell. Ten 4K60 tiles is a wall that cannot play, however it is stored.
+
+     So a package is re-encoded, once, on the server (GPU, ~3.5x realtime on a
+     4K60 source): tile-sized, <=30 fps, 8-bit. Twenty tiles at 768x432/30 add
+     up to less decode work than a single 4K60 stream, and the preload Blobs
+     get ~15x smaller as a side effect, which keeps every loop restart local.
+  */
+
+  const SHRINK_TIERS = [360, 432, 540, 720, 1080];
+  const SHRINK_FPS = 30;
+  const SHRINK_CONCURRENCY = 2;   // matches the server's encoder slots
+  const SHRINK_KEY = "multiscreen.shrink";
+
+  // Physical pixels of height one tile really gets, on this screen, at this
+  // tile count. "Auto" encodes for the wall, not for the source.
+  function autoTileHeight(count) {
+    const n = Math.max(1, count || players.length || 1);
+    const mode = layoutSelect.value;
+    const cols = mode === "auto"
+      ? Math.ceil(Math.sqrt(n))
+      : Math.max(1, Math.min(parseInt(mode, 10) || 1, n));
+    const rows = Math.ceil(n / cols);
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const cellW = (screen.width * dpr) / cols;
+    const cellH = (screen.height * dpr) / rows;
+    // A 16:9 video inside the cell is bounded by both dimensions; the smaller
+    // bound is the height that actually shows.
+    return Math.min(cellH, cellW * 9 / 16);
+  }
+
+  // Max height to encode to, or 0 for "leave the file alone".
+  function shrinkTier(count) {
+    const v = packSize.value;
+    if (v === "0") return 0;
+    if (v !== "auto") return parseInt(v, 10) || 0;
+    const want = autoTileHeight(count);
+    return SHRINK_TIERS.find(t => t >= want) || SHRINK_TIERS[SHRINK_TIERS.length - 1];
+  }
+
+  function updatePackSizeHint() {
+    const tier = shrinkTier();
+    if (!tier) {
+      packSizeHint.textContent =
+        "Videos are stored exactly as downloaded — a 4K60 source stays 4K60, " +
+        "and the wall pays for every pixel it then throws away.";
+      return;
+    }
+    const auto = packSize.value === "auto";
+    packSizeHint.textContent =
+      "Re-encoded to at most " + tier + "p / " + SHRINK_FPS + " fps" +
+      (auto ? " — tiles are ~" + Math.round(autoTileHeight()) +
+              "px tall on this screen" : "") +
+      ". Done once, on the server, with the GPU.";
+  }
+
+  function loadShrinkPrefs() {
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem(SHRINK_KEY) || "null"); }
+    catch (e) {}
+    if (saved && typeof saved.size === "string" &&
+        [...packSize.options].some(o => o.value === saved.size)) {
+      packSize.value = saved.size;
+    }
+    if (saved && typeof saved.onLoad === "boolean") {
+      packShrinkOnLoad.checked = saved.onLoad;
+    }
+    updatePackSizeHint();
+  }
+
+  function saveShrinkPrefs() {
+    try {
+      localStorage.setItem(SHRINK_KEY, JSON.stringify({
+        size: packSize.value, onLoad: packShrinkOnLoad.checked,
+      }));
+    } catch (e) {}
+  }
+
+  packSize.addEventListener("change", () => { updatePackSizeHint(); saveShrinkPrefs(); });
+  packShrinkOnLoad.addEventListener("change", saveShrinkPrefs);
+
+  const tierLabel = to => to ? to.w + "x" + to.h + (to.fps ? "@" + Math.round(to.fps) : "") : "";
+
+  /* Uploads `blob` and has the server re-encode it to `hbox` tall.
+
+     Returns { url, from, to, encoded }: `url` plays from the local server
+     (Range-seekable, so REC and Compile keep working), `encoded` is false when
+     the file was already inside the box and nothing was re-encoded — which is
+     what makes running this over an already-light package almost free.
+     onProgress(frac, status) is called while encoding. */
+  async function shrinkToTile(blob, name, hbox, onProgress) {
+    const up = await apiJson("/api/upload?name=" + encodeURIComponent(name), {
+      method: "POST",
+      headers: { "Content-Type": blob.type || "video/mp4" },
+      body: blob,
+    });
+    if (!up || !up.ok) throw new Error((up && up.error) || "upload failed");
+
+    const fid = String(up.url).split("/")[3];
+    // Whatever happens next, the plain upload is already playable: failures
+    // carry it so the caller can fall back to an un-shrunk local file instead
+    // of losing the tile.
+    const uploadedUrl = location.origin + up.url;
+    try {
+      const start = await apiJson("/api/shrink?id=" + encodeURIComponent(fid) +
+        "&h=" + hbox + "&fps=" + SHRINK_FPS + "&drop=1", { method: "POST" });
+      if (!start || !start.ok) throw new Error((start && start.error) || "shrink refused");
+      if (!start.needed) {
+        return { url: location.origin + start.url, from: start.from,
+                 to: start.from, encoded: false };
+      }
+      for (;;) {
+        await new Promise(r => setTimeout(r, 500));
+        const st = await apiJson("/api/shrink/status?id=" +
+          encodeURIComponent(start.job_id));
+        if (!st || !st.ok) throw new Error((st && st.error) || "lost the shrink job");
+        if (st.stage === "error") throw new Error(st.error || "encode failed");
+        // A caller returning false from onProgress is asking to stop waiting
+        // (Cancel). The encode already running on the server is left to finish.
+        if (onProgress && onProgress(st.pct || 0, st) === false) {
+          throw new Error("cancelled");
+        }
+        if (st.ready && st.url) {
+          return { url: location.origin + st.url, from: st.from, to: st.to,
+                   encoded: true };
+        }
+      }
+    } catch (e) {
+      e.uploadedUrl = uploadedUrl;
+      throw e;
+    }
+  }
+
   /* ---------- Pack: save/load the setup WITH the videos (.zip) ----------
      "Save" keeps only the links — reopening re-downloads (and re-resolves)
      everything, and yt-dlp stream URLs expire. "Pack" also stores the bytes
@@ -1968,17 +2491,52 @@
     return t;
   })();
 
+  // Slicing-by-8: eight derived tables let the loop eat 8 bytes per
+  // iteration instead of 1. Measured ~1.4x over the byte-at-a-time version
+  // (V8 optimises that one well), so the real win is elsewhere: Pack now
+  // hashes each chunk as it arrives off the network, which takes the CRC pass
+  // off the critical path entirely and leaves the zip step almost free.
+  const CRC_TABLES = (() => {
+    const tables = [CRC_TABLE];
+    for (let k = 1; k < 8; k++) {
+      const prev = tables[k - 1], cur = new Uint32Array(256);
+      for (let i = 0; i < 256; i++) {
+        cur[i] = (prev[i] >>> 8) ^ CRC_TABLE[prev[i] & 0xFF];
+      }
+      tables.push(cur);
+    }
+    return tables;
+  })();
+
+  const CRC_INIT = 0xFFFFFFFF;
+  const crc32Final = crc => (crc ^ 0xFFFFFFFF) >>> 0;
+
+  function crc32Update(crc, buf) {
+    const t0 = CRC_TABLES[0], t1 = CRC_TABLES[1], t2 = CRC_TABLES[2],
+          t3 = CRC_TABLES[3], t4 = CRC_TABLES[4], t5 = CRC_TABLES[5],
+          t6 = CRC_TABLES[6], t7 = CRC_TABLES[7];
+    let c = crc, i = 0;
+    const end8 = buf.length - 8;
+    for (; i <= end8; i += 8) {
+      c ^= buf[i] | (buf[i + 1] << 8) | (buf[i + 2] << 16) | (buf[i + 3] << 24);
+      c = t7[c & 0xFF] ^ t6[(c >>> 8) & 0xFF] ^ t5[(c >>> 16) & 0xFF] ^
+          t4[(c >>> 24) & 0xFF] ^ t3[buf[i + 4]] ^ t2[buf[i + 5]] ^
+          t1[buf[i + 6]] ^ t0[buf[i + 7]];
+    }
+    for (; i < buf.length; i++) {
+      c = t0[(c ^ buf[i]) & 0xFF] ^ (c >>> 8);
+    }
+    return c >>> 0;
+  }
+
   async function crc32Blob(blob) {
-    let crc = 0xFFFFFFFF;
+    let crc = CRC_INIT;
     // 8 MB slices keep the peak memory flat even for the biggest entries.
     for (let off = 0; off < blob.size; off += 8 * 1024 * 1024) {
-      const buf = new Uint8Array(
-        await blob.slice(off, off + 8 * 1024 * 1024).arrayBuffer());
-      for (let i = 0; i < buf.length; i++) {
-        crc = CRC_TABLE[(crc ^ buf[i]) & 0xFF] ^ (crc >>> 8);
-      }
+      crc = crc32Update(crc, new Uint8Array(
+        await blob.slice(off, off + 8 * 1024 * 1024).arrayBuffer()));
     }
-    return (crc ^ 0xFFFFFFFF) >>> 0;
+    return crc32Final(crc);
   }
 
   // entries: [{ name, blob }] → Blob de um .zip válido (método STORE).
@@ -1988,7 +2546,8 @@
     let offset = 0;
     for (const e of entries) {
       const nameBytes = enc.encode(e.name);
-      const crc = await crc32Blob(e.blob);
+      // Pack hashes while downloading, so the CRC usually arrives for free.
+      const crc = e.crc != null ? e.crc : await crc32Blob(e.blob);
       const size = e.blob.size;
       const lh = new DataView(new ArrayBuffer(30));
       lh.setUint32(0, 0x04034b50, true);  // local file header
@@ -2084,48 +2643,625 @@
   // 📦 Pack — downloads a .zip with multiscreen.json + every video the
   // tiles are holding in memory. Tiles that can't be captured (iframes,
   // HLS, oversized) stay as plain links inside the json.
-  async function downloadPack() {
-    if (!players.length) { toast("Add at least one video before packing."); return; }
-    const name = (prompt("Name for the package:", "MultiScreen") || "").trim();
-    if (!name) return;
-    const original = packBtn.textContent;
-    packBtn.disabled = true;
+  /* ---------- Pack ----------
+
+     Every tile is downloaded into one .zip. Three things used to make this
+     painful and all three are fixed here:
+
+       - it walked the players one at a time, so 20 tiles meant 20 serial
+         downloads;
+       - a single fetch with no timeout could hang forever, freezing the whole
+         run at "3/20" with nothing on screen to say why;
+       - oversized files were downloaded in full and only then discarded, and
+         the CRC pass at the end chewed through every byte again.
+
+     Now: a bounded parallel pool, a per-tile stall watchdog that gives up on
+     one tile without taking the run down, a size check before the body is
+     read, and CRCs computed on the chunks as they arrive.
+  */
+
+  const PACK_CONCURRENCY = 4;   // the proxy shards across 6 ports; 4 is polite
+  const PACK_STALL_MS = 45000;  // no bytes for this long → drop it, keep the link
+  const PACK_UI_MS = 150;       // per-row repaint throttle
+
+  // Advisory only. Nothing here refuses a download — a big file just gets
+  // flagged on its row, because the zip is assembled in memory and the browser
+  // is the one that decides when that becomes a problem.
+  const PACK_WARN_BYTES = 300 * 1024 * 1024;        // per file
+  const PACK_WARN_TOTAL = 3 * 1024 * 1024 * 1024;   // for the whole package
+
+  let packRunning = false;
+  let packAborted = false;
+  let packJobs = [];
+
+  /* A build survives its own window: closing it while it runs minimizes
+     instead of cancelling, so the wall keeps playing while the videos come
+     down. Two consequences are handled here — the toolbar button becomes the
+     minimized window (phase + percentage + the stats line on hover), and every
+     row's state is kept as data so a closed window can skip its DOM writes
+     entirely and still be correct when reopened. On a 48-tile build that is a
+     few hundred writes a second the wall does not have to pay for. */
+  let packPhase = "";           // "" | "fetch" | "shrink"
+  let packShrinkTotal = 0;
+  let packStatsText = "";
+  let packBarFrac = 0;
+  const PACK_BTN_TITLE = packBtn.title;
+  const packModalOpen = () => packModal.classList.contains("open");
+
+  const mbOf = b => (b / 1048576).toFixed(1) + " MB";
+
+  function packRow(job, i) {
+    const li = document.createElement("li");
+    li.className = "pack-row";
+    const idx = document.createElement("span");
+    idx.className = "idx";
+    idx.textContent = String(i + 1);
+    const name = document.createElement("span");
+    name.className = "name";
+    name.textContent = job.label;
+    name.title = job.label;
+    const state = document.createElement("span");
+    state.className = "state";
+    const bar = document.createElement("span");
+    bar.className = "bar";
+    const fill = document.createElement("i");
+    bar.appendChild(fill);
+    li.append(idx, name, state, bar);
+    job.row = li;
+    job.stateEl = state;
+    job.fillEl = fill;
+    return li;
+  }
+
+  function paintJobState(job) {
+    job.row.className = "pack-row " + job.state;
+    job.stateEl.textContent = job.stateText || "";
+  }
+
+  function setJobState(job, cls, text, force) {
+    // The state is recorded first and always: the throttle and the closed
+    // window only ever skip the painting, never the bookkeeping.
+    job.state = cls;
+    job.stateText = text;
+    const now = Date.now();
+    if (!force && cls === "active" && now - (job._ui || 0) < PACK_UI_MS) return;
+    job._ui = now;
+    if (packModalOpen()) paintJobState(job);
+  }
+
+  function setJobBar(job, frac) {
+    job.frac = Math.max(0, Math.min(1, frac || 0));
+    if (packModalOpen()) job.fillEl.style.width = job.frac * 100 + "%";
+  }
+
+  // Bytes of finished video Pack is holding on to for the next build.
+  function packHeldBytes() {
+    let held = 0;
+    players.forEach(p => {
+      if (p._packBlob) held += p._packBlob.size;
+      if (p._packSmall) held += p._packSmall.blob.size;
+    });
+    return held;
+  }
+
+  let packStatsAt = 0;
+  function packTick(force) {
+    const now = Date.now();
+    if (!force && now - packStatsAt < 200) return;
+    packStatsAt = now;
+    let done = 0, bytes = 0, frac = 0, fetched = 0;
+    packJobs.forEach(j => {
+      bytes += j.bytes || 0;
+      if (j.fetchedNow) fetched += j.bytes || 0;
+      if (j.state === "done" || j.state === "failed" ||
+          j.state === "skipped" || j.state === "cancelled") { done++; frac += 1; }
+      else if (j.total) frac += Math.min(1, (j.bytes || 0) / j.total);
+    });
+    packBarFrac = frac / Math.max(1, packJobs.length);
+    // In the re-encode phase every job is already fetched, so the fetch
+    // fraction sits at 100%; count settled re-encodes instead.
+    if (packPhase === "shrink") {
+      packBarFrac = packShrinkTotal
+        ? packJobs.filter(j => j.shrinkSettled).length / packShrinkTotal
+        : 0;
+    }
+    const parts = [done + "/" + packJobs.length + " done", mbOf(bytes)];
+    if (packRunning) {
+      const secs = (now - packStartedAt) / 1000;
+      parts.push(secs > 0.5 ? mbOf(fetched / secs) + "/s" : "…");
+    }
+    if (bytes > PACK_WARN_TOTAL) {
+      parts.push("⚠ over " + mbOf(PACK_WARN_TOTAL) + " — the zip is built in memory");
+    }
+    packStatsText = parts.join(" · ");
+    if (packModalOpen()) {
+      packFill.style.width = packBarFrac * 100 + "%";
+      packStats.textContent = packStatsText;
+    }
+    if (packRunning) paintPackButton();
+  }
+
+  // The toolbar button IS the minimized window: it carries the phase and the
+  // percentage, and the full stats line as its tooltip.
+  function paintPackButton() {
+    packBtn.classList.toggle("packing", packRunning);
+    if (!packRunning) {
+      packBtn.textContent = "📦 Pack";
+      packBtn.title = PACK_BTN_TITLE;
+      packBtn.style.removeProperty("--p");
+      return;
+    }
+    const pct = Math.round(packBarFrac * 100);
+    packBtn.style.setProperty("--p", pct + "%");
+    packBtn.textContent = (packPhase === "shrink" ? "🗜 " : "📦 ") + pct + "%";
+    packBtn.title = (packPhase === "shrink" ? "Re-encoding" : "Downloading") +
+      " · " + packStatsText + " — click to reopen";
+  }
+
+  // Reopening replays everything the closed window skipped.
+  function repaintPack() {
+    packJobs.forEach(job => {
+      if (!job.row) return;
+      paintJobState(job);
+      job.fillEl.style.width = (job.frac || 0) * 100 + "%";
+    });
+    packFill.style.width = packBarFrac * 100 + "%";
+    if (packStatsText) packStats.textContent = packStatsText;
+  }
+
+  let packStartedAt = 0;
+
+  function packSourceUrl(p) {
+    const src = (p.media && p.media.currentSrc) || "";
+    if (/^https?:|^blob:/.test(src)) return src;
+    return /^https?:/.test(p.url || "") ? p.url : "";
+  }
+
+  /* --- Pack cache -------------------------------------------------------
+
+     In-memory blobs die with the tab, so reloading the page threw away every
+     finished download. Completed videos are parked in IndexedDB instead,
+     keyed on the tile's ORIGINAL url: p.url may be a proxied or freshly
+     signed address that changes on every re-resolve, while p.raw is what the
+     user pasted and what the saved .json carries.
+  */
+
+  const PACK_DB = "multiscreen";
+  const PACK_STORE = "packCache";
+  let packDbPromise = null;
+  let packPersistBroken = false;   // quota / private mode → memory-only
+
+  function packDb() {
+    if (packDbPromise) return packDbPromise;
+    packDbPromise = new Promise((resolve, reject) => {
+      if (!window.indexedDB) { reject(new Error("no indexeddb")); return; }
+      const req = indexedDB.open(PACK_DB, 1);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(PACK_STORE)) db.createObjectStore(PACK_STORE);
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    }).catch(e => { packDbPromise = null; throw e; });
+    return packDbPromise;
+  }
+
+  const packKey = p => (p.raw || p.url || "") + "|" + (p.quality || "");
+
+  async function packIdb(mode, fn) {
+    const db = await packDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(PACK_STORE, mode);
+      let out;
+      try { out = fn(tx.objectStore(PACK_STORE)); }
+      catch (e) { reject(e); return; }
+      tx.oncomplete = () =>
+        resolve(out && typeof IDBRequest !== "undefined" && out instanceof IDBRequest
+          ? out.result : out);
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
+  }
+
+  async function packCacheGet(p) {
+    try { return await packIdb("readonly", s => s.get(packKey(p))); }
+    catch (e) { return null; }
+  }
+
+  async function packCachePut(p, blob, crc) {
     try {
+      await packIdb("readwrite", s => s.put({
+        blob, crc, size: blob.size, type: blob.type, url: p.raw, ts: Date.now(),
+      }, packKey(p)));
+      return true;
+    } catch (e) {
+      // Usually QuotaExceededError. The in-memory copy still serves this
+      // session, so say it once and carry on.
+      if (!packPersistBroken) {
+        packPersistBroken = true;
+        toast("Couldn't save the download to disk (storage full?) — it's kept in memory for this session only.", 5000);
+      }
+      return false;
+    }
+  }
+
+  /* A shrunk copy is cached apart from the download it came from, keyed on the
+     tier: changing tile size must cost a re-encode, never a re-download. */
+  const packSmallKey = (p, tier) => packKey(p) + "|" + tier + "p" + SHRINK_FPS;
+
+  async function packSmallGet(p, tier) {
+    try { return await packIdb("readonly", s => s.get(packSmallKey(p, tier))); }
+    catch (e) { return null; }
+  }
+
+  async function packSmallPut(p, tier, blob, crc) {
+    try {
+      await packIdb("readwrite", s => s.put({
+        blob, crc, size: blob.size, tier, url: p.raw, ts: Date.now(),
+      }, packSmallKey(p, tier)));
+    } catch (e) {
+      if (!packPersistBroken) {
+        packPersistBroken = true;
+        toast("Couldn't save the re-encoded video to disk (storage full?) — " +
+              "it's kept in memory for this session only.", 5000);
+      }
+    }
+  }
+
+  async function packCacheClear() {
+    try { await packIdb("readwrite", s => s.clear()); } catch (e) {}
+  }
+
+  // Pulls anything already on disk into the tiles before the list is drawn.
+  async function hydratePackCache() {
+    await Promise.all(players.map(async p => {
+      if (p._packBlob) return;
+      const rec = await packCacheGet(p);
+      if (rec && rec.blob) { p._packBlob = rec.blob; p._packCrc = rec.crc; }
+    }));
+  }
+
+  /* --- Pack modal --- */
+
+  function applyPackRowState(job) {
+    const p = job.p;
+    if (p._packBlob) {
+      // Downloaded in an earlier run (this session or a previous one).
+      job.blob = p._packBlob;
+      job.crc = p._packCrc;
+      job.bytes = job.total = p._packBlob.size;
+      setJobState(job, "done", "ready · " + mbOf(job.bytes), true);
+      setJobBar(job, 1);
+      return;
+    }
+    const isVideo = p.media && p.media.tagName === "VIDEO";
+    if (!isVideo || p.media._hls || p._isHlsMedia) {
+      setJobState(job, "skipped", "link only (iframe/HLS)", true);
+    } else if (p._blob) {
+      setJobState(job, "queued", "cached · " + mbOf(p._blob.size), true);
+      job.total = p._blob.size;
+    } else if (!packSourceUrl(p)) {
+      setJobState(job, "skipped", "no direct source", true);
+    } else {
+      setJobState(job, "queued", "queued", true);
+    }
+    setJobBar(job, 0);
+  }
+
+  function packSummary() {
+    const todo = packJobs.filter(j => j.state === "queued" || j.state === "failed").length;
+    const ready = packJobs.filter(j => j.state === "done").length;
+    const links = packJobs.filter(j => j.state === "skipped").length;
+    const held = packHeldBytes();
+    packFill.style.width = packJobs.length ? (ready / packJobs.length) * 100 + "%" : "0%";
+    packStats.textContent = todo + " to fetch · " + ready + " already downloaded · " +
+      links + " kept as link" + (held ? " · holding " + mbOf(held) : "");
+    packGo.textContent = todo ? "📦 Fetch " + todo + " & build" : "📦 Build .zip";
+    packReset.disabled = !held;
+  }
+
+  async function openPackModal() {
+    if (!players.length) { toast("Add at least one video before packing."); return; }
+    if (packRunning) { packModal.classList.add("open"); repaintPack(); return; }
+    packName.value = packName.value.trim() || "MultiScreen";
+    updatePackSizeHint();
+    packJobs = players.map(p => {
+      const titleEl = p.bar && p.bar.querySelector(".title");
+      return {
+        p,
+        label: (titleEl && titleEl.textContent.trim()) || p.url || p.raw,
+        state: "queued", bytes: 0, total: 0, blob: null, crc: null, ctrl: null,
+      };
+    });
+    packListEl.innerHTML = "";
+    packJobs.forEach((job, i) => {
+      packListEl.appendChild(packRow(job, i));
+      setJobState(job, "queued", "checking cache…", true);
+    });
+    packFill.style.width = "0%";
+    packStats.textContent = "Checking what's already downloaded…";
+    packGo.disabled = true;
+    packCancelBtn.textContent = "Close";
+    packModal.classList.add("open");
+    packName.focus();
+
+    await hydratePackCache();
+    packJobs.forEach(applyPackRowState);
+    packGo.disabled = false;
+    packSummary();
+  }
+
+  // Throws away everything Pack is holding, on disk and in memory.
+  async function resetPack() {
+    if (packRunning) return;
+    players.forEach(p => {
+      p._packBlob = null; p._packCrc = null; p._packSmall = null;
+    });
+    await packCacheClear();
+    toast("Pack cache cleared.");
+    openPackModal();
+  }
+
+  function minimizePack() {
+    packModal.classList.remove("open");
+    paintPackButton();
+    toast("Pack keeps running in the background — click 📦 to check on it.", 3500);
+  }
+
+  function closePackModal() {
+    // While a build runs, every way out of the window (button, backdrop, Esc)
+    // minimizes it. Stopping the build is Cancel's job, and only Cancel's.
+    if (packRunning) { minimizePack(); return; }
+    packModal.classList.remove("open");
+  }
+
+  async function packOne(job) {
+    if (packAborted) { setJobState(job, "cancelled", "cancelled", true); return; }
+    if (job.state === "skipped") return;
+    const p = job.p;
+
+    // Kept from an earlier build: nothing to do, this is the "only fetch what's
+    // missing" path.
+    if (p._packBlob) {
+      job.blob = p._packBlob;
+      job.crc = p._packCrc;
+      job.bytes = job.total = p._packBlob.size;
+      setJobBar(job, 1);
+      setJobState(job, "done", "ready · " + mbOf(job.bytes), true);
+      return;
+    }
+
+    // A preload already in flight for this tile produces exactly the blob we
+    // want, so wait for it rather than pulling the same bytes down twice.
+    if (!p._blob && p._preloading) {
+      setJobState(job, "active", "waiting for cache", true);
+      const until = Date.now() + 30000;
+      while (p._preloading && !p._blob && !packAborted && Date.now() < until) {
+        await new Promise(r => setTimeout(r, 250));
+      }
+    }
+
+    if (p._blob) {
+      setJobState(job, "active", "hashing", true);
+      job.blob = p._blob;
+      job.bytes = job.total = p._blob.size;
+      job.crc = await crc32Blob(p._blob);
+      p._packBlob = job.blob;
+      p._packCrc = job.crc;
+      packCachePut(p, job.blob, job.crc);
+      setJobBar(job, 1);
+      setJobState(job, "done", "cached · " + mbOf(job.bytes), true);
+      packTick(true);
+      return;
+    }
+
+    const url = packSourceUrl(p);
+    if (!url) { setJobState(job, "skipped", "no direct source", true); return; }
+
+    const ctrl = new AbortController();
+    job.ctrl = ctrl;
+    let stallTimer = null;
+    const armStall = () => {
+      clearTimeout(stallTimer);
+      stallTimer = setTimeout(() => { job.stalled = true; ctrl.abort(); }, PACK_STALL_MS);
+    };
+
+    try {
+      setJobState(job, "active", "connecting", true);
+      armStall();
+      const res = await fetch(url, { signal: ctrl.signal });
+      if (!res.ok || !res.body) throw new Error("http " + res.status);
+      const declared = parseInt(res.headers.get("Content-Length") || "0", 10);
+      job.total = declared || 0;
+      job.fetchedNow = true;
+      // Size is advisory here: a big file is flagged, never refused.
+      job.big = declared > PACK_WARN_BYTES;
+      const reader = res.body.getReader();
+      const chunks = [];
+      let got = 0, crc = CRC_INIT;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (packAborted) { ctrl.abort(); throw new Error("cancelled"); }
+        armStall();
+        got += value.byteLength;
+        if (got > PACK_WARN_BYTES) job.big = true;
+        crc = crc32Update(crc, value);   // hashing rides along with the download
+        chunks.push(value);
+        job.bytes = got;
+        setJobBar(job, job.total ? got / job.total : 0);
+        setJobState(job, "active",
+          (job.big ? "⚠ " : "") + mbOf(got) +
+          (job.total ? " / " + mbOf(job.total) : ""));
+        packTick();
+      }
+      clearTimeout(stallTimer);
+      job.blob = new Blob(chunks, {
+        type: res.headers.get("Content-Type") || "video/mp4",
+      });
+      job.crc = crc32Final(crc);
+      job.bytes = got;
+      // Kept so a rebuild — or a retry of the tiles that failed, or a whole
+      // new session after a reload — skips this one.
+      p._packBlob = job.blob;
+      p._packCrc = job.crc;
+      packCachePut(p, job.blob, job.crc);
+      setJobBar(job, 1);
+      setJobState(job, "done", (job.big ? "⚠ " : "") + mbOf(got), true);
+      if (job.big) {
+        toast("“" + job.label + "” is " + mbOf(got) +
+              " — embedded anyway, but the package will be heavy.", 4200);
+      }
+    } catch (e) {
+      clearTimeout(stallTimer);
+      job.blob = null;
+      if (packAborted) setJobState(job, "cancelled", "cancelled", true);
+      else if (job.stalled) setJobState(job, "failed", "stalled · link · will retry", true);
+      else setJobState(job, "failed", "failed · link · will retry", true);
+    } finally {
+      job.ctrl = null;
+      packTick(true);
+    }
+  }
+
+  /* Second phase of a build: every fetched video is re-encoded to tile size
+     before it goes into the zip. A failure here is not fatal — the original
+     blob is packed instead, because a heavy package beats no package. */
+  async function packShrinkOne(job, tier) {
+    if (packAborted || !job.blob) return;
+    const p = job.p;
+    const was = job.blob.size;
+
+    const adopt = (rec, note) => {
+      job.blob = rec.blob;
+      job.crc = rec.crc;
+      job.bytes = job.total = rec.blob.size;
+      setJobBar(job, 1);
+      setJobState(job, "done", note + " · " + mbOf(rec.blob.size), true);
+      packTick(true);
+    };
+
+    if (p._packSmall && p._packSmall.tier === tier) {
+      adopt(p._packSmall, tier + "p");
+      return;
+    }
+    const cached = await packSmallGet(p, tier);
+    if (cached && cached.blob) {
+      p._packSmall = { tier, blob: cached.blob, crc: cached.crc };
+      adopt(p._packSmall, tier + "p");
+      return;
+    }
+    if (packAborted) return;
+
+    const fname = sanitizeFileName(job.label || "video").slice(0, 60) + ".mp4";
+    try {
+      setJobState(job, "active", "re-encoding", true);
+      setJobBar(job, 0);
+      const res = await shrinkToTile(job.blob, fname, tier, (frac, st) => {
+        if (packAborted) return false;
+        setJobBar(job, frac);
+        setJobState(job, "active", "→ " + tierLabel(st.to) + " " +
+                    Math.round(frac * 100) + "%");
+        packTick();
+        return true;
+      });
+      if (!res.encoded) {
+        // Already inside the box (a 480p source on a 540p wall): nothing to do,
+        // and nothing was re-encoded.
+        setJobBar(job, 1);
+        setJobState(job, "done", "already " + tierLabel(res.from) + " · " +
+                    mbOf(was), true);
+        return;
+      }
+      const small = await fetch(res.url).then(r => r.blob());
+      if (!small.size) throw new Error("empty result");
+      const crc = await crc32Blob(small);
+      p._packSmall = { tier, blob: small, crc };
+      packSmallPut(p, tier, small, crc);
+      adopt(p._packSmall, tierLabel(res.to) + " · was " + mbOf(was));
+    } catch (e) {
+      // Keep whatever we already had: job.blob is untouched on this path.
+      if (packAborted) { setJobState(job, "cancelled", "cancelled", true); return; }
+      setJobBar(job, 1);
+      setJobState(job, "done", "⚠ not re-encoded · " + mbOf(was), true);
+      job.shrinkError = (e && e.message) || "shrink failed";
+    }
+  }
+
+  // Bounded parallel pool: N runners pulling from one shared cursor.
+  async function packPool(jobs, limit, worker) {
+    let cursor = 0;
+    const runners = [];
+    for (let k = 0; k < Math.min(limit, jobs.length); k++) {
+      runners.push((async () => {
+        while (cursor < jobs.length) await worker(jobs[cursor++]);
+      })());
+    }
+    await Promise.all(runners);
+  }
+
+  async function runPack() {
+    const name = packName.value.trim();
+    if (!name) { packName.focus(); return; }
+    packRunning = true;
+    packAborted = false;
+    packStartedAt = Date.now();
+    packPhase = "fetch";
+    packGo.textContent = "▁ Minimize";
+    packCancelBtn.textContent = "⨯ Cancel";
+    paintPackButton();
+
+    try {
+      await packPool(packJobs, PACK_CONCURRENCY, packOne);
+      packTick(true);
+      if (packAborted) { toast("Pack cancelled."); return; }
+
+      const tier = shrinkTier();
+      if (tier) {
+        const toShrink = packJobs.filter(j => j.blob);
+        // A second build reuses the same job objects ("Retry N & build"), so
+        // last run's outcome must not count towards this one's progress.
+        toShrink.forEach(j => { j.shrinkSettled = false; j.shrinkError = null; });
+        packPhase = "shrink";
+        packShrinkTotal = toShrink.length;
+        packStatsText = "Re-encoding to " + tier + "p / " + SHRINK_FPS + " fps…";
+        if (packModalOpen()) packStats.textContent = packStatsText;
+        await packPool(toShrink, SHRINK_CONCURRENCY, async (j) => {
+          await packShrinkOne(j, tier);
+          j.shrinkSettled = true;
+        });
+        packTick(true);
+        if (packAborted) { toast("Pack cancelled."); return; }
+        const failed = packJobs.filter(j => j.shrinkError).length;
+        if (failed) {
+          toast(failed + " video(s) could not be re-encoded and went in at " +
+                "full size — check the server console.", 5000);
+        }
+      }
+
       const items = [], entries = [];
       let linked = 0;
-      for (const p of players) {
-        packBtn.textContent = "📦 " + (items.length + 1) + "/" + players.length + "…";
-        const item = { url: p.raw, quality: p.quality || "" };
-        let blob = p._blob || null;
-        if (!blob && p.media && p.media.tagName === "VIDEO" &&
-            !p.media._hls && !p._isHlsMedia) {
-          // Not cached yet (preload still running, or loop was off):
-          // grab it now from the same source the player is using.
-          try {
-            const res = await fetch(p.media.currentSrc || p.url);
-            if (res.ok) {
-              const b = await res.blob();
-              if (b.size <= PRELOAD_MAX_BYTES) blob = b;
-            }
-          } catch (e) {}
-        }
-        if (blob) {
-          const fname = "videos/" +
-            String(entries.length + 1).padStart(2, "0") +
-            guessExt(blob.type, p.raw);
-          entries.push({ name: fname, blob });
+      packJobs.forEach(job => {
+        const item = { url: job.p.raw, quality: job.p.quality || "" };
+        if (job.blob) {
+          const fname = "videos/" + String(entries.length + 1).padStart(2, "0") +
+            guessExt(job.blob.type, job.p.raw);
+          entries.push({ name: fname, blob: job.blob, crc: job.crc });
           item.file = fname;
-          const titleEl = p.bar && p.bar.querySelector(".title");
-          item.title = (titleEl && titleEl.textContent.trim()) || "";
+          item.title = job.label;
         } else {
           linked++;
         }
         items.push(item);
-      }
+      });
+
       const config = {
         app: "multiscreen", version: 2, kind: "pack", name,
         layout: layoutSelect.value, quality: qualitySelect.value,
         loop: loopEnabled, items, urls: items.map(it => it.url),
+        // What the videos were encoded for, so a reload can tell at a glance
+        // whether this package is already tile-sized.
+        tileHeight: tier || 0, tileFps: tier ? SHRINK_FPS : 0,
         ts: Date.now(),
       };
       entries.unshift({
@@ -2133,7 +3269,8 @@
         blob: new Blob([JSON.stringify(config, null, 2)],
                        { type: "application/json" }),
       });
-      packBtn.textContent = "📦 zipping…";
+
+      packStats.textContent = "Zipping " + (entries.length - 1) + " video(s)…";
       const zip = await buildZip(entries);
       const a = document.createElement("a");
       a.href = URL.createObjectURL(zip);
@@ -2142,24 +3279,58 @@
       a.click();
       a.remove();
       setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-      toast("Package: " + (entries.length - 1) + " video(s) embedded" +
-        (linked ? ", " + linked + " kept as link (iframe/HLS/too big)" : "") +
-        " — " + (zip.size / 1024 / 1024).toFixed(1) + " MB.", 5000);
+
+      const secs = ((Date.now() - packStartedAt) / 1000).toFixed(0);
+      packStats.textContent = (entries.length - 1) + " video(s) embedded" +
+        (linked ? ", " + linked + " kept as link" : "") +
+        " · " + (zip.size / 1048576).toFixed(1) + " MB · " + secs + "s";
+      toast("Package ready: " + (entries.length - 1) + " video(s) embedded" +
+        (linked ? ", " + linked + " kept as link (iframe/HLS/failed)" : "") +
+        " — " + (zip.size / 1048576).toFixed(1) + " MB.", 5000);
     } finally {
+      packRunning = false;
+      packPhase = "";
+      packShrinkTotal = 0;
+      packGo.disabled = false;
+      packGo.textContent = "📦 Build .zip";
+      packCancelBtn.textContent = "Close";
       packBtn.disabled = false;
-      packBtn.textContent = original;
+      paintPackButton();
+      // Blobs are deliberately NOT dropped here: keeping them is what makes a
+      // rebuild fetch only the tiles that are still missing. "↺ Reset" frees
+      // them, and so does closing or reloading a tile.
+      packSummary();
+      const todo = packJobs.filter(j => j.state === "queued" || j.state === "failed").length;
+      if (todo) packGo.textContent = "📦 Retry " + todo + " & build";
     }
   }
 
-  // Uploads a Blob to the local server so the restored tile behaves like
+  function cancelPack() {
+    packAborted = true;
+    packJobs.forEach(j => { if (j.ctrl) { try { j.ctrl.abort(); } catch (e) {} } });
+    packStats.textContent = "Cancelling…";
+  }
+
+  packForm.addEventListener("submit", (e) => { e.preventDefault(); if (!packRunning) runPack(); });
+  packGo.addEventListener("click", () => {
+    if (packRunning) minimizePack(); else runPack();
+  });
+  packCancelBtn.addEventListener("click", () => {
+    if (packRunning) cancelPack(); else closePackModal();
+  });
+  packReset.addEventListener("click", () => { resetPack(); });
+  packModal.addEventListener("click", (e) => {
+    if (e.target === packModal) closePackModal();
+  });
+
+  // Uploads a Blob to the local server so the restored tile behaves like  // Uploads a Blob to the local server so the restored tile behaves like
   // any local file (Range seeking, REC, Compile). Returns the playable URL.
   async function uploadBlob(blob, name) {
-    const res = await fetch("/api/upload?name=" + encodeURIComponent(name), {
+    const data = await apiJson("/api/upload?name=" + encodeURIComponent(name), {
       method: "POST",
       headers: { "Content-Type": blob.type || "application/octet-stream" },
       body: blob,
     });
-    const data = await res.json();
     if (!data || !data.ok) throw new Error((data && data.error) || "upload failed");
     return location.origin + data.url;
   }
@@ -2183,27 +3354,61 @@
     if (cfg.quality != null && cfg.quality !== "") qualitySelect.value = String(cfg.quality);
     if (typeof cfg.loop === "boolean") { loopEnabled = cfg.loop; loopToggle.checked = cfg.loop; }
     updateLayout();
-    let restored = 0, fallback = 0;
+
+    /* Old packages hold the source files as downloaded — 4K60 among them — and
+       that is what stalls the wall. Shrinking on the way in fixes a package
+       that already exists without re-downloading anything: each video is
+       re-encoded to tile size before its tile is created. A package that is
+       already light costs one probe per file and no encoding. */
+    const tier = packShrinkOnLoad.checked ? shrinkTier(items.length) : 0;
+    let restored = 0, fallback = 0, shrunk = 0;
     for (let i = 0; i < items.length; i++) {
       const it = items[i];
       const entry = it.file ? await zip.read(it.file).catch(() => null) : null;
       if (!entry) { addPlayer(it.url, it.quality); continue; }
       const fname = sanitizeFileName((it.title || "video " + (i + 1)))
         .slice(0, 60) + guessExt(entry.type, it.file);
-      toast("Restoring package… " + (i + 1) + "/" + items.length, 60000);
+      const step = "Restoring package… " + (i + 1) + "/" + items.length;
+      toast(step, 60000);
+      // The tile plays the local file but keeps identifying itself by the page
+      // it came from: that link is what Save records, what the pack cache is
+      // keyed on, and what 🔗 Related mines. Playback is unaffected — a preset
+      // source is what mounts and what a reload remounts.
+      const place = url =>
+        addPlayer(it.url || url, it.quality,
+                  { type: "file", url, title: it.title || fname });
       try {
-        const url = await uploadBlob(entry, fname);
-        addPlayer(url, it.quality, { type: "file", url, title: it.title || fname });
+        let url;
+        if (tier) {
+          const res = await shrinkToTile(entry, fname, tier, (frac, st) => {
+            toast(step + " · " + st.from.h + "p" +
+                  (st.from.fps > SHRINK_FPS ? Math.round(st.from.fps) : "") +
+                  " → " + tierLabel(st.to) + " · " + Math.round(frac * 100) + "%",
+                  60000);
+          });
+          url = res.url;
+          if (res.encoded) shrunk++;
+        } else {
+          url = await uploadBlob(entry, fname);
+        }
+        place(url);
         restored++;
       } catch (e) {
+        if (e && e.uploadedUrl) {
+          // The re-encode failed but the upload landed: play the heavy file.
+          place(e.uploadedUrl);
+          restored++;
+          continue;
+        }
         // Server unreachable: play straight from the zip bytes instead.
         const bu = URL.createObjectURL(entry);
-        addPlayer(bu, it.quality, { type: "file", url: bu, title: it.title || fname });
+        place(bu);
         fallback++;
       }
     }
     toast("Package loaded: " + restored + " local video(s)" +
-      (fallback ? " + " + fallback + " in memory only" : "") + ".", 4500);
+      (shrunk ? " · " + shrunk + " re-encoded to " + tier + "p" : "") +
+      (fallback ? " + " + fallback + " in memory only" : "") + ".", 5000);
   }
 
   // Merge = pick several saved .json files and combine their videos into one
@@ -2296,7 +3501,7 @@
     loadFileInput.value = "";  // allows loading the same file again later
   });
 
-  packBtn.addEventListener("click", downloadPack);
+  packBtn.addEventListener("click", openPackModal);
 
   mergeBtn.addEventListener("click", () => mergeFileInput.click());
   mergeFileInput.addEventListener("change", () => {
@@ -2304,7 +3509,9 @@
     mergeFileInput.value = "";  // allows re-selecting the same files later
   });
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") { closeSaveModal(); closeCompileModal(); closeTranceModal(); }
+    if (e.key === "Escape") {
+      closeSaveModal(); closeCompileModal(); closeTranceModal(); closePackModal();
+    }
   });
 
   /* ---------- Trance ----------
@@ -2334,6 +3541,7 @@
     rate: 0.75,
     duck: 0.75,      // how far the videos drop while a phrase is spoken
     lang: "en-US",   // BCP 47 tag the utterances are tagged with
+    gender: "female",// which half of the roster the voice list is narrowed to
     voice: "",       // preferred SpeechSynthesis voice name, "" = auto
   };
 
@@ -2510,6 +3718,79 @@
 
   /* --- Voice --- */
 
+  // A SpeechSynthesisVoice carries only name, lang, localService and voiceURI
+  // — the API exposes no gender at all. So the only way to offer "female
+  // voices" is to match the name against the known rosters: Windows SAPI,
+  // Chrome's Google voices, Edge's Microsoft Natural set and macOS.
+  const VOICE_GENDERS = {
+    female: ["zira", "hazel", "susan", "maria", "heloisa", "catherine", "linda",
+             "aria", "jenny", "michelle", "ana", "emma", "ava", "nancy", "sara",
+             "sarah", "amber", "ashley", "cora", "elizabeth", "monica", "jane",
+             "luna", "serena", "sonia", "libby", "maisie", "abbi", "bella",
+             "hollie", "olivia", "natasha", "annette", "carly", "freya",
+             "joanne", "tina", "emily", "neerja", "francisca", "brenda", "elza",
+             "giovanna", "leila", "leticia", "manuela", "yara", "thalita",
+             "raquel", "fernanda", "joana", "catarina", "samantha", "karen",
+             "moira", "tessa", "fiona", "victoria", "allison", "zoe", "luciana",
+             "agnes", "female", "feminina", "mulher"],
+    male:   ["david", "mark", "guy", "davis", "tony", "jason", "eric", "roger",
+             "christopher", "steffan", "brian", "andrew", "adam", "brandon",
+             "derek", "dustin", "jacob", "liam", "ryan", "thomas", "alfie",
+             "elliot", "ethan", "noah", "oliver", "william", "james", "george",
+             "daniel", "prabhat", "ravi", "antonio", "donato", "fabio",
+             "humberto", "julio", "nicolau", "valerio", "macerio", "duarte",
+             "alex", "fred", "tom", "rishi", "felipe", "jorge", "diego",
+             "male", "masculina", "homem"],
+  };
+
+  // Voices whose name carries no first name to match on.
+  const VOICE_GENDER_BY_NAME = {
+    "google us english": "female",
+    "google portugues do brasil": "female",
+  };
+
+  const normVoice = s => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+
+  function voiceGender(v) {
+    const name = normVoice(v.name || "");
+    if (VOICE_GENDER_BY_NAME[name]) return VOICE_GENDER_BY_NAME[name];
+    const tokens = name.split(/[^a-z]+/).filter(Boolean);
+    const genders = ["female", "male"];
+    for (const g of genders) {
+      if (VOICE_GENDERS[g].some(w => tokens.indexOf(w) >= 0)) return g;
+    }
+    // Edge sometimes glues the name to a suffix ("FranciscaNeural"), so fall
+    // back to a substring pass — long names only, or "ana" and "tom" would
+    // match half the roster by accident.
+    for (const g of genders) {
+      if (VOICE_GENDERS[g].some(w => w.length >= 5 && name.indexOf(w) >= 0)) return g;
+    }
+    return "";
+  }
+
+  // Voices for the current language narrowed to the wanted gender. Falls back
+  // to the whole language list when the filter would leave nothing to pick.
+  function filteredVoices() {
+    if (trance.gender === "any") return langVoices;
+    const hit = langVoices.filter(v => voiceGender(v) === trance.gender);
+    return hit.length ? hit : langVoices;
+  }
+
+  function genderMark(v) {
+    const g = voiceGender(v);
+    return g === "female" ? " ♀" : g === "male" ? " ♂" : "";
+  }
+
+  function pickVoice() {
+    if (trance.voice) {
+      const exact = langVoices.find(x => x.name === trance.voice);
+      if (exact) return exact;
+    }
+    // "Auto" has to honour the gender filter itself: left alone the browser
+    // picks the system default, which on Windows is usually the male one.
+    return filteredVoices()[0] || null;
+  }
+
   // Chrome's better voices are network-backed and register late, so this runs
   // again on `voiceschanged` — and on every language change.
   function refreshVoices() {
@@ -2522,23 +3803,42 @@
     // language, then — if the machine has neither — everything installed.
     const exact = all.filter(v => tagOf(v) === want);
     const sameLang = all.filter(v => tagOf(v).split("-")[0] === base && exact.indexOf(v) < 0);
-    langVoices = exact.concat(sameLang);
-    const list = langVoices.length ? langVoices : all;
+    const matched = exact.concat(sameLang);
+    langVoices = matched.length ? matched : all;
+    const list = filteredVoices();
+    const resolved = pickVoice();
+
     tranceVoice.innerHTML = "";
     const auto = document.createElement("option");
     auto.value = "";
-    auto.textContent = langVoices.length
-      ? "Auto (" + trance.lang + ")"
-      : "Auto (no " + trance.lang + " voice installed)";
+    auto.textContent = resolved
+      ? "Auto —" + genderMark(resolved) + " " + resolved.name
+      : "Auto (no voice available)";
     tranceVoice.appendChild(auto);
     list.forEach(v => {
       const o = document.createElement("option");
       o.value = v.name;
-      o.textContent = v.name + " · " + v.lang + (v.localService ? "" : " · online");
+      o.textContent = v.name + genderMark(v) + " · " + v.lang +
+        (v.localService ? "" : " · online");
       tranceVoice.appendChild(o);
     });
     tranceVoice.value = trance.voice || "";
-    if (tranceVoice.value !== (trance.voice || "")) tranceVoice.value = "";
+    if (tranceVoice.value !== (trance.voice || "")) { tranceVoice.value = ""; trance.voice = ""; }
+
+    // Say so when the wanted gender simply isn't installed, instead of
+    // silently handing back a male voice.
+    const wanted = trance.gender === "any" ? null : trance.gender;
+    if (!matched.length) {
+      tranceVoiceHint.textContent = "No " + trance.lang + " voice on this browser — " +
+        "showing every voice installed. Edge ships a large online set.";
+    } else if (wanted && !langVoices.some(v => voiceGender(v) === wanted)) {
+      tranceVoiceHint.textContent = "No " + wanted + " " + trance.lang + " voice here — " +
+        "showing all. Edge has many (Aria, Jenny, Michelle for en-US; Francisca, " +
+        "Giovanna for pt-BR); on Windows you can add more under " +
+        "Settings › Time & language › Speech.";
+    } else {
+      tranceVoiceHint.textContent = "";
+    }
   }
 
   function speakPhrase(text, onDone) {
@@ -2548,7 +3848,7 @@
     u.rate = trance.rate;
     u.pitch = 0.9;   // a touch lower reads as calmer
     u.volume = trance.voiceVolume;
-    const v = langVoices.find(x => x.name === trance.voice);
+    const v = pickVoice();
     if (v) u.voice = v;
     let done = false;
     const finish = () => {
@@ -2624,6 +3924,7 @@
     tranceNoise.value = trance.noise;
     tranceLang.value = trance.lang;
     if (!tranceLang.value) { tranceLang.value = "en-US"; trance.lang = "en-US"; }
+    tranceGender.value = trance.gender || "female";
     tranceOrder.value = trance.order;
     tranceInterval.value = String(trance.intervalSec);
     tranceBedVol.value = String(Math.round(trance.bedVolume * 100));
@@ -2648,6 +3949,7 @@
     trance.noise = tranceNoise.value;
     trance.order = tranceOrder.value;
     trance.lang = tranceLang.value || "en-US";
+    trance.gender = tranceGender.value || "female";
     trance.voice = tranceVoice.value || "";
     trance.intervalSec = Math.min(300, Math.max(5, parseInt(tranceInterval.value, 10) || 20));
     trance.bedVolume = (parseInt(tranceBedVol.value, 10) || 0) / 100;
@@ -2696,9 +3998,16 @@
     });
   });
 
-  // Switching language re-filters the voice list; the old pick rarely survives.
+  // Switching language or gender re-filters the list; the old pick rarely
+  // survives either change, so it drops back to Auto.
   tranceLang.addEventListener("change", () => {
     trance.lang = tranceLang.value || "en-US";
+    trance.voice = "";
+    refreshVoices();
+  });
+
+  tranceGender.addEventListener("change", () => {
+    trance.gender = tranceGender.value || "female";
     trance.voice = "";
     refreshVoices();
   });
@@ -3215,6 +4524,7 @@
   const startUrls = new URLSearchParams(location.search).get("add");
   if (startUrls) startUrls.split(",").forEach(u => addPlayer(u));
 
+  loadShrinkPrefs();
   urlInput.focus();
 })();
 </script>

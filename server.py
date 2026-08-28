@@ -47,6 +47,7 @@ import collections
 import itertools
 import json
 import os
+import random
 import shutil
 import socket
 import subprocess
@@ -639,6 +640,33 @@ COMPILE_JOB_TTL = 1800  # forget finished jobs after 30 min
 _UPLOAD_DIR = os.path.join(tempfile.gettempdir(), "multiscreen_uploads")
 _uploads = {}
 _uploads_lock = threading.Lock()
+
+
+_FID_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
+def _recover_upload(fid):
+    """Locate an uploaded file on disk when the in-memory registry has no entry.
+
+    That registry dies with the process, so restarting the server used to break
+    every tile of a restored package even though the files were still sitting in
+    the upload directory. The id IS the file's name, so the mapping rebuilds
+    itself on demand — which is what makes restarting (to pick up new server
+    code, say) cost nothing but the reconnect. The 32-hex check is also what
+    keeps this from being a path-traversal hole."""
+    if not _FID_RE.match((fid or "").lower()):
+        return None
+    try:
+        for name in os.listdir(_UPLOAD_DIR):
+            if os.path.splitext(name)[0].lower() == fid.lower():
+                found = os.path.join(_UPLOAD_DIR, name)
+                if os.path.isfile(found):
+                    with _uploads_lock:
+                        _uploads[fid] = found
+                    return found
+    except OSError:
+        pass
+    return None
 
 
 def _venc_args(encoder):
@@ -1471,6 +1499,463 @@ def _run_compile_job(job_id, cuts, resolution, qmax):
         _set_job(job_id, stage="error", error=str(e)[:200])
 
 
+# ---------- /api/shrink (re-encode a video to the size it is shown at) ----------
+
+# A 4K60 tile costs the GPU ~500 Mpixel/s to decode and then lands on a cell of
+# ~400px: almost every decoded pixel is thrown away by the scaler. A 3060 has a
+# single NVDEC engine that saturates at one or two 4K60 H.264 streams, so a wall
+# with ten of them stalls no matter how the bytes were obtained — which is why
+# packing the videos locally (no network, no yt-dlp) did not help.
+#
+# Shrinking re-encodes each video once, offline, to the resolution the tile
+# actually shows, at <=30 fps and 8-bit yuv420p. Twenty tiles at 768x432/30 add
+# up to less decode work than a single 4K60 stream.
+
+# The tier the browser asks for comes from the wall's own geometry; this is
+# only the default when a caller leaves it out.
+SHRINK_FPS = 30
+# NVENC sessions. More does not go faster (one encode engine) and consumer
+# drivers cap concurrent sessions anyway; two keeps the engine fed while one
+# process is still demuxing.
+SHRINK_WORKERS = 2
+SHRINK_JOB_TTL = 1800
+
+_shrink_jobs = {}
+_shrink_jobs_lock = threading.Lock()
+_shrink_slots = threading.BoundedSemaphore(SHRINK_WORKERS)
+
+
+def _set_shrink(job_id, **fields):
+    with _shrink_jobs_lock:
+        job = _shrink_jobs.get(job_id)
+        if job:
+            job.update(fields)
+
+
+_DUR_RE = re.compile(r"Duration:\s*(\d+):(\d+):([\d.]+)")
+_VID_RE = re.compile(
+    r"Stream #\d+:\d+.*?: Video: (\w+)[^\n]*?\b(\d{2,5})x(\d{2,5})\b[^\n]*")
+_FPS_RE = re.compile(r"([\d.]+) fps")
+_AUD_RE = re.compile(r"Stream #\d+:\d+.*?: Audio: ")
+
+
+def probe_media(path):
+    """Video geometry of a local file, parsed from `ffmpeg -i` (the
+    imageio-ffmpeg bundle ships no ffprobe). None if it isn't readable."""
+    if not FFMPEG:
+        return None
+    try:
+        r = subprocess.run([FFMPEG, "-hide_banner", "-i", path],
+                           capture_output=True, text=True, timeout=60)
+    except Exception:  # noqa: BLE001
+        return None
+    err = r.stderr or ""
+    vm = _VID_RE.search(err)
+    if not vm:
+        return None
+    dm = _DUR_RE.search(err)
+    fm = _FPS_RE.search(err[vm.start():vm.end() + 200])
+    return {
+        "codec": vm.group(1),
+        "w": int(vm.group(2)),
+        "h": int(vm.group(3)),
+        "fps": float(fm.group(1)) if fm else 0.0,
+        "dur": (int(dm.group(1)) * 3600 + int(dm.group(2)) * 60
+                + float(dm.group(3))) if dm else 0.0,
+        "audio": bool(_AUD_RE.search(err)),
+    }
+
+
+def _shrink_target(info, hbox):
+    """(w, h) the video ends up at inside an `hbox`-tall box, aspect kept and
+    never upscaled. The width bound only bites on wider-than-21:9 sources
+    (side-by-side renders), which carry far more pixels than their height
+    suggests."""
+    wbox = (int(hbox * 21 / 9) // 2) * 2
+    w, h = info["w"], info["h"]
+    scale = min(1.0, wbox / float(w), hbox / float(h))
+    return max(2, (int(w * scale) // 2) * 2), max(2, (int(h * scale) // 2) * 2)
+
+
+def _shrink_filters(info, hbox, fps_cap):
+    """Filter chain + target size. fps is capped only when the source is above
+    it (upsampling 24 fps to 30 duplicates frames and grows the file for
+    nothing), scale only when it is bigger, and the output always lands on
+    8-bit yuv420p — a 10-bit/HDR source has no hardware decoder in the browser
+    and silently falls back to software."""
+    tw, th = _shrink_target(info, hbox)
+    vf = []
+    if info["fps"] > fps_cap + 0.5:
+        vf.append("fps=%d" % fps_cap)
+    if (tw, th) != (info["w"], info["h"]):
+        vf.append("scale=%d:%d:flags=bicubic" % (tw, th))
+    vf.append("format=yuv420p")
+    return ",".join(vf), tw, th
+
+
+def _shrink_needed(info, hbox, fps_cap):
+    _, tw, th = _shrink_filters(info, hbox, fps_cap)
+    return (tw, th) != (info["w"], info["h"]) or info["fps"] > fps_cap + 0.5
+
+
+def _forget_upload(path):
+    """Drop an uploaded file once its shrunk replacement exists. Only used for
+    uploads made for shrinking, never for a file a tile is still playing."""
+    with _uploads_lock:
+        for fid, p in list(_uploads.items()):
+            if p == path:
+                _uploads.pop(fid, None)
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def _run_shrink_job(job_id, src, out, info, hbox, fps_cap, drop_src):
+    """Background worker: re-encode `src` into `out`, publishing % as it goes.
+
+    Tries the hardware encoder with CUDA decoding first, then a plain software
+    pass, so a driver refusing another NVENC session (or a codec NVDEC can't
+    take) still produces a file."""
+    vf, tw, th = _shrink_filters(info, hbox, fps_cap)
+    dur = info["dur"] or 0.0
+    _set_shrink(job_id, to={"w": tw, "h": th,
+                            "fps": min(float(fps_cap), info["fps"] or fps_cap)})
+
+    def attempt(encoder, hwaccel):
+        cmd = [FFMPEG, "-y", "-hide_banner", "-nostdin", "-loglevel", "error"]
+        if hwaccel:
+            cmd += ["-hwaccel", "cuda"]
+        cmd += ["-i", src, "-map", "0:v:0", "-vf", vf]
+        cmd += _venc_args(encoder)
+        if info["audio"]:
+            cmd += ["-map", "0:a:0?", "-c:a", "aac", "-b:a", "128k",
+                    "-ac", "2", "-ar", "48000"]
+        else:
+            cmd += ["-an"]
+        cmd += ["-movflags", "+faststart", "-progress", "pipe:1", out]
+
+        # -progress writes to stdout; ffmpeg's own errors go to a file, so the
+        # pipe has a single reader and can't deadlock.
+        errpath = out + ".log"
+        with open(errpath, "wb") as errf:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errf)
+            try:
+                for raw in proc.stdout:
+                    line = raw.decode("utf-8", "replace").strip()
+                    if line.startswith("out_time_us=") and dur > 0:
+                        try:
+                            secs = int(line.split("=", 1)[1]) / 1e6
+                        except ValueError:
+                            continue
+                        _set_shrink(job_id, pct=max(0.0, min(0.99, secs / dur)))
+                    elif line.startswith("total_size="):
+                        try:
+                            _set_shrink(job_id, bytes=int(line.split("=", 1)[1]))
+                        except ValueError:
+                            pass
+            finally:
+                proc.stdout.close()
+                proc.wait(timeout=120)
+        try:
+            with open(errpath, "rb") as f:
+                tail = f.read().decode("utf-8", "replace").strip().splitlines()
+            os.remove(errpath)
+        except OSError:
+            tail = []
+        if proc.returncode == 0 and os.path.isfile(out) and os.path.getsize(out) > 0:
+            return True, ""
+        return False, (tail[-1] if tail else "ffmpeg exit %d" % proc.returncode)
+
+    attempts = [(VIDEO_ENCODER, VIDEO_ENCODER == "h264_nvenc")]
+    if VIDEO_ENCODER != "libx264":
+        attempts.append(("libx264", False))
+    err = "shrink not attempted"
+    for encoder, hwaccel in attempts:
+        _set_shrink(job_id, stage="encoding", encoder=encoder, pct=0.0)
+        try:
+            ok, err = attempt(encoder, hwaccel)
+        except Exception as e:  # noqa: BLE001
+            ok, err = False, str(e)[:200]
+        if not ok:
+            continue
+        fid = uuid.uuid4().hex
+        final = os.path.join(_UPLOAD_DIR, fid + ".mp4")
+        try:
+            os.replace(out, final)
+        except OSError as e:
+            _set_shrink(job_id, stage="error", error="could not store: %s" % e)
+            return
+        with _uploads_lock:
+            _uploads[fid] = final
+        if drop_src:
+            _forget_upload(src)
+        _set_shrink(job_id, stage="done", pct=1.0,
+                    url="/api/localfile/%s/file.mp4" % fid,
+                    bytes=os.path.getsize(final))
+        return
+
+    for leftover in (out, out + ".log"):
+        if os.path.exists(leftover):
+            try:
+                os.remove(leftover)
+            except OSError:
+                pass
+    _set_shrink(job_id, stage="error", error=(err or "encode failed")[:300])
+
+
+# ---------- /api/related (one more tile like the ones already up) ----------
+
+# No site offers a cross-site "related videos" API, but every watch page
+# already links to that site's own recommendations. So the wall itself is the
+# query: fetch a page one of the tiles came from, keep the links shaped like
+# that page, and rank them by how much their words overlap the titles already
+# on screen.
+#
+# "Shaped like" is what separates a video page from a tag, category or profile
+# page without knowing anything about the site: the path template. On
+# rule34video a watch URL is /video/<digits>/<slug>/, so a link with that exact
+# template is another video and /tags/<name>/ is not — and the same trick works
+# on a site nobody wrote a rule for.
+
+RELATED_SEED_FETCHES = 3       # pages per request; each one is a real round trip
+RELATED_TAG_FETCHES = 2        # index pages for the wall's recurring labels
+RELATED_POOL_TTL = 600         # how long a scraped page's links stay usable
+RELATED_FAIL_TTL = 120         # ...and how long a page that failed is left alone
+RELATED_MAX_CANDIDATES = 400   # video links kept per page
+RELATED_MAX_TAGS = 80          # taxonomy links kept per page
+
+# Path segments that mark a site's own taxonomy — the label a video was filed
+# under. This is the wall's theme stated by the site instead of guessed from a
+# title: the performer, the character, the game, the studio. A page filed under
+# the same label is "more of what is on screen" in a way word overlap can only
+# approximate.
+_TAXONOMY_SEGS = frozenset("""
+tag tags category categories cat model models actress actresses star stars
+pornstar pornstars performer performers artist artists author authors character
+characters game games franchise series studio studios channel channels genre
+genres keyword keywords playlist playlists member members user users uploader
+tagged label labels topic topics collection collections
+""".split())
+
+_related_pool = {}             # seed url -> (expiry, [{url, title}])
+_related_lock = threading.Lock()
+
+_A_TAG_RE = re.compile(r"<a\s([^>]*?)>(.*?)</a>", re.I | re.S)
+_HREF_RE = re.compile(r"""href\s*=\s*(?:"([^"]*)"|'([^']*)')""", re.I)
+_LABEL_ATTR_RE = re.compile(
+    r"""(?:title|alt|aria-label)\s*=\s*(?:"([^"]*)"|'([^']*)')""", re.I)
+_TAG_STRIP_RE = re.compile(r"<[^>]+>")
+_WORD_RE = re.compile(r"[a-z0-9]{2,}")
+_NON_PAGE_RE = re.compile(
+    r"\.(mp4|webm|m3u8|ts|jpg|jpeg|png|gif|webp|svg|css|js|json|zip|rar|pdf)($|\?)",
+    re.I)
+
+# Words that say nothing about *which* video this is.
+_RELATED_STOP = frozenset("""
+video videos vid clip clips watch free hd sd full new newest best top porn xxx
+sex part scene fps 4k 60fps 2160p 1080p 720p 480p 360p com www net org online
+download stream streaming mp4 webm the and for with from that this out are was
+were her his she him you your our all any not but has have had
+to at in on by or of it is as an be do no so up we he my me us if
+""".split())
+
+
+# Query parameters that never say *which* video a link points at.
+_TRACKING_PARAMS = frozenset("""
+from ref referer referrer src source campaign fbclid gclid msclkid
+utm_source utm_medium utm_campaign utm_term utm_content
+""".split())
+
+
+def _norm_url(u):
+    """Identity for de-duplication: no scheme, no 'www.', no trailing slash,
+    and no tracking parameters — but the identifying ones are kept, because on
+    plenty of sites (?v=, ?id=) the query IS the video."""
+    try:
+        p = urllib.parse.urlsplit((u or "").strip())
+    except ValueError:
+        return (u or "").strip().lower()
+    host = p.netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    keep = sorted((k, v) for k, v in
+                  urllib.parse.parse_qsl(p.query, keep_blank_values=True)
+                  if k.lower() not in _TRACKING_PARAMS)
+    tail = "?" + urllib.parse.urlencode(keep) if keep else ""
+    return (host + p.path.rstrip("/") + tail).lower()
+
+
+def _url_shape(url):
+    """(host, path template). Digit runs become '#', slugs become '*', and
+    short words stay themselves — those are the site's structure ('video',
+    'watch', 'v'), which is exactly what must match."""
+    try:
+        p = urllib.parse.urlsplit(url)
+    except ValueError:
+        return ("", ())
+    segs = []
+    for s in [x for x in p.path.split("/") if x]:
+        # A colon marks a namespace, not a title ("Category:Foo", "Talk:Foo").
+        # Keeping the prefix in the shape is what stops those from passing as
+        # articles/videos, since a real one has no prefix at all.
+        prefix = ""
+        if ":" in s:
+            head, _, s = s.partition(":")
+            prefix = head.lower() + ":"
+        if s.isdigit():
+            segs.append(prefix + "#")
+        elif len(s) > 18 or "-" in s or "_" in s or any(c.isdigit() for c in s):
+            segs.append(prefix + "*")
+        else:
+            segs.append(prefix + s.lower())
+    return (p.netloc.lower(), tuple(segs))
+
+
+def _words(text):
+    return {w for w in _WORD_RE.findall((text or "").lower())
+            if w not in _RELATED_STOP and not w.isdigit()}
+
+
+def _slug_words(url):
+    """A URL's own words. On these sites the slug carries the title, so this
+    works even when the link had no text at all (thumbnail-only markup)."""
+    try:
+        path = urllib.parse.urlsplit(url).path
+    except ValueError:
+        return set()
+    return _words(re.sub(r"[-_/.]+", " ", urllib.parse.unquote(path)))
+
+
+def _is_taxonomy_path(url):
+    """The label a taxonomy link names, or "". /tags/shadowheart/ names
+    "shadowheart"; /video/123/slug/ names nothing. The marker may sit anywhere
+    but last (/en/tags/x, /video/tags/x), and the last segment is the label."""
+    try:
+        segs = [x for x in urllib.parse.urlsplit(url).path.split("/") if x]
+    except ValueError:
+        return "", ""
+    if len(segs) < 2:
+        return "", ""
+    low = [x.lower() for x in segs]
+    if low[-1] in _TAXONOMY_SEGS:
+        return "", ""            # the index itself, not one label
+    kind = next((x for x in low[:-1] if x in _TAXONOMY_SEGS), "")
+    if not kind:
+        return "", ""
+    return kind, _pretty_slug(url)
+
+
+def _mine_page(page_url, text, want_shape):
+    """Everything a page offers: links shaped like `want_shape` (other video
+    pages) and the site's taxonomy links (what this video is filed under).
+
+    `want_shape` is a parameter rather than derived from `page_url` so a tag
+    index can be mined for videos as well — its own shape is a tag's, not a
+    video's, and that is exactly the page where every link is on-theme."""
+    import html as _html
+    videos, tags = {}, {}
+    for m in _A_TAG_RE.finditer(text):
+        attrs, inner = m.group(1), m.group(2)
+        hm = _HREF_RE.search(attrs)
+        if not hm:
+            continue
+        href = (hm.group(1) or hm.group(2) or "").strip()
+        if not href or href[0] in "#?" or href.lower().startswith(
+                ("javascript:", "mailto:", "data:")):
+            continue
+        url = urllib.parse.urljoin(page_url, _html.unescape(href)).split("#")[0]
+        if not url.lower().startswith(("http://", "https://")):
+            continue
+        if _NON_PAGE_RE.search(url):
+            continue
+        key = _norm_url(url)
+        lm = _LABEL_ATTR_RE.search(attrs) or _LABEL_ATTR_RE.search(inner)
+        label = (lm.group(1) or lm.group(2)) if lm else _TAG_STRIP_RE.sub(" ", inner)
+        label = re.sub(r"\s+", " ", _html.unescape(label or "")).strip()[:200]
+        # A label of "x", ">>", "HD" or "Watch now" says less than the slug the
+        # URL already carries, so it is only kept when it says something.
+        if len(label) < 4 or not _words(label):
+            label = ""
+
+        if want_shape[1] and _url_shape(url) == want_shape:
+            if key not in videos and len(videos) < RELATED_MAX_CANDIDATES:
+                videos[key] = {"url": url, "title": label}
+            continue
+        kind, name = _is_taxonomy_path(url)
+        if kind and key not in tags and len(tags) < RELATED_MAX_TAGS:
+            tags[key] = {"url": url, "kind": kind, "label": label or name,
+                         "name": name}
+    return list(videos.values()), list(tags.values())
+
+
+def _related_pooled(page_url, want_shape):
+    """What the pool already holds for this page, or None. Lets a request tell
+    free pages from ones that would cost a round trip."""
+    now = time.time()
+    with _related_lock:
+        hit = _related_pool.get((page_url, want_shape))
+    return hit[1] if hit and hit[0] > now else None
+
+
+def _pretty_slug(url):
+    """A readable title out of a URL, for links whose markup carried no text
+    at all (a bare thumbnail is common in a related-videos grid)."""
+    try:
+        segs = [x for x in urllib.parse.urlsplit(url).path.split("/") if x]
+    except ValueError:
+        return url
+    for seg in reversed(segs):
+        if seg.isdigit():
+            continue
+        name = re.sub(r"\.[a-z0-9]{2,5}$", "", urllib.parse.unquote(seg), flags=re.I)
+        name = re.sub(r"[-_+]+", " ", name).strip()
+        if name:
+            return name[:120]
+    return url
+
+
+def _mine_cached(page_url, want_shape):
+    """_mine_page over the network, memoised. Returns ((videos, tags), cached).
+
+    The cache is what makes repeated clicks cheap: the first pays for the page,
+    the rest draw from the pool it filled — and since what is already on the
+    wall is excluded per request, each click still yields something new."""
+    now = time.time()
+    key = (page_url, want_shape)
+    with _related_lock:
+        hit = _related_pool.get(key)
+        if hit and hit[0] > now:
+            return hit[1], True
+    try:
+        text, _used_imp = _fetch_page_html(page_url)
+    except Exception:
+        # Remember the failure, briefly. Without this a label page that 403s is
+        # re-fetched on every single click — twice over, since a refused fetch
+        # also costs the impersonation retry underneath.
+        with _related_lock:
+            _related_pool[key] = (now + RELATED_FAIL_TTL, ([], []))
+        raise
+    mined = _mine_page(page_url, text, want_shape)
+    with _related_lock:
+        _related_pool[key] = (now + RELATED_POOL_TTL, mined)
+        for dead in [k for k, v in _related_pool.items() if v[0] <= now]:
+            _related_pool.pop(dead, None)
+    return mined, False
+
+
+def _bigrams(text):
+    """Adjacent word pairs, skipping filler. "Shadowheart Duality" is a much
+    stronger match than "shadowheart" and "duality" landing separately."""
+    toks = _WORD_RE.findall((text or "").lower())
+    out = set()
+    for a, b in zip(toks, toks[1:]):
+        if a in _RELATED_STOP or b in _RELATED_STOP or a.isdigit() or b.isdigit():
+            continue
+        out.add(a + " " + b)
+    return out
+
+
 # ---------- diagnosis helpers ----------
 
 def _safe_url(u):
@@ -1558,6 +2043,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.handle_diagnose(qs)
         if path == "/api/compile/status":
             return self.handle_compile_status(qs)
+        if path == "/api/shrink/status":
+            return self.handle_shrink_status(qs)
         if path == "/api/compile/result":
             return self.handle_compile_result(qs)
         if path.startswith("/api/localfile/"):
@@ -1571,6 +2058,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.handle_compile()
         if parsed.path == "/api/upload":
             return self.handle_upload(qs)
+        if parsed.path == "/api/shrink":
+            return self.handle_shrink(qs)
+        if parsed.path == "/api/related":
+            return self.handle_related()
         return self.send_error(404, "Not found")
 
     def do_OPTIONS(self):
@@ -1879,6 +2370,308 @@ class Handler(BaseHTTPRequestHandler):
         if snap.get("tmpdir"):
             shutil.rmtree(snap["tmpdir"], ignore_errors=True)
 
+    # ---------- /api/related (a tile like the ones already up) ----------
+
+    def handle_related(self):
+        """Suggest video pages resembling the wall's own tiles.
+
+        Two waves. The first mines the pages the tiles came from, for both
+        sibling video links and the site's own taxonomy links. Those labels are
+        then ranked by how much of the wall they actually name — the performer,
+        character or game that keeps coming back — and the second wave mines
+        the index pages of the top ones, where every video is on-theme by the
+        site's own filing rather than by a guess about words.
+
+        Body: {seeds: [page urls to mine], have: [urls to exclude],
+               titles: [titles already on screen], want: N}
+        Answers {ok, items: [{url, title, score, reason, via}], themes, ...},
+        best first."""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        try:
+            data = json.loads((self.rfile.read(length) if length > 0 else b"")
+                              .decode("utf-8"))
+        except Exception:  # noqa: BLE001
+            return self.send_json({"ok": False, "error": "invalid JSON body"}, 400)
+
+        seeds, seen_seed = [], set()
+        for u in (data.get("seeds") or []):
+            if not isinstance(u, str):
+                continue
+            u = u.strip()
+            if not u.lower().startswith(("http://", "https://")):
+                continue
+            if _NON_PAGE_RE.search(u):
+                continue          # a direct media link is not a page to mine
+            key = _norm_url(u)
+            if key in seen_seed:
+                continue
+            seen_seed.add(key)
+            seeds.append(u)
+        if not seeds:
+            return self.send_json({"ok": False, "error":
+                "no page links to work from — Related mines the pages the "
+                "tiles came from, so it needs at least one tile added by its "
+                "site URL (not a direct file, a local file or an embed)."}, 400)
+
+        try:
+            want = max(1, min(20, int(data.get("want") or 5)))
+        except (TypeError, ValueError):
+            want = 5
+
+        # Pages already scraped are free, so mine every one of those and spend
+        # the round trips on a few fresh ones. That is also what keeps repeated
+        # clicks varied: the pool grows while the wall's exclusions grow with it.
+        shapes = {u: _url_shape(u) for u in seeds}
+        cached = [u for u in seeds if _related_pooled(u, shapes[u]) is not None]
+        fresh = [u for u in seeds if _related_pooled(u, shapes[u]) is None]
+        random.shuffle(fresh)
+        picked = cached[:8] + fresh[:RELATED_SEED_FETCHES]
+
+        errors, fetches = [], 0
+
+        def mine(page_url, want_shape):
+            """One page, tolerating failure: a dead seed must not take the
+            request down when the others have plenty to offer."""
+            try:
+                return _mine_cached(page_url, want_shape)
+            except ResolveError as e:
+                errors.append("%s: %s" % (_safe_url(page_url), e.message))
+            except Exception as e:  # noqa: BLE001
+                errors.append("%s: %s" % (_safe_url(page_url), str(e)[:120]))
+            return None, False
+
+        # --- wave 1: the pages the tiles came from ---
+        mined = {}
+        if picked:
+            with ThreadPoolExecutor(max_workers=len(picked)) as ex:
+                futures = {ex.submit(mine, u, shapes[u]): u for u in picked}
+                for fut in as_completed(futures):
+                    page = futures[fut]
+                    res, was_cached = fut.result()
+                    if res is None:
+                        continue
+                    if not was_cached:
+                        fetches += 1
+                    mined[page] = res
+
+        # --- what the wall is about ---
+        # A word's weight is how many titles carry it: the name that keeps
+        # coming back (a performer, a character, a game) outweighs the one that
+        # appeared once, which is the whole point of "more like these".
+        title_words = []
+        for t in (data.get("titles") or []):
+            if isinstance(t, str) and t.strip():
+                title_words.append(_words(t))
+        for u in seeds:
+            title_words.append(_slug_words(u))
+        weight = collections.Counter()
+        for tw in title_words:
+            weight.update(tw)
+        wall_bigrams = set()
+        for t in (data.get("titles") or []):
+            if isinstance(t, str):
+                wall_bigrams |= _bigrams(t)
+
+        # --- the wall's own labels, ranked by how much of the wall they name ---
+        tag_index = {}
+        for page, (_vids, tags) in mined.items():
+            for tg in tags:
+                key = _norm_url(tg["url"])
+                entry = tag_index.setdefault(key, {
+                    "url": tg["url"], "kind": tg["kind"],
+                    "label": tg["label"] or tg["name"],
+                    "words": _words(tg["label"] or tg["name"]), "pages": set(),
+                })
+                entry["pages"].add(page)
+                entry["shape"] = shapes.get(page, ("", ()))
+        for tg in tag_index.values():
+            # How many tiles this label actually names, then how many of the
+            # mined pages agreed on it.
+            tg["names"] = sum(1 for tw in title_words if tg["words"] & tw)
+            tg["seen"] = len(tg["pages"])
+        themes = sorted(tag_index.values(),
+                        key=lambda t: (-t["names"], -t["seen"], t["label"]))
+        themes = [t for t in themes if t["words"] and t["shape"][1]]
+
+        # --- wave 2: the index pages of the top labels ---
+        # Every video on "/tags/shadowheart/" is on-theme by the site's own
+        # judgement, which beats anything a title-word heuristic can infer.
+        on_theme = {}
+        picked_themes = themes[:RELATED_TAG_FETCHES]
+        if picked_themes:
+            with ThreadPoolExecutor(max_workers=len(picked_themes)) as ex:
+                futures = {ex.submit(mine, t["url"], t["shape"]): t
+                           for t in picked_themes}
+                for fut in as_completed(futures):
+                    tg = futures[fut]
+                    res, was_cached = fut.result()
+                    if res is None:
+                        continue
+                    if not was_cached:
+                        fetches += 1
+                    for c in res[0]:
+                        on_theme.setdefault(_norm_url(c["url"]), (c, tg))
+
+        have = {_norm_url(u) for u in (data.get("have") or [])
+                if isinstance(u, str)}
+        have |= seen_seed
+
+        # --- score everything mined ---
+        best = {}
+
+        def offer(cand, via, theme):
+            key = _norm_url(cand["url"])
+            if key in have:
+                return
+            title = cand["title"] or _pretty_slug(cand["url"])
+            words = _words(title) | _slug_words(cand["url"])
+            shared = sorted(words & set(weight), key=lambda w: -weight[w])
+            score = sum(weight[w] for w in shared)
+            pairs = _bigrams(title) & wall_bigrams
+            score += 2 * len(pairs)
+            if theme:
+                # Filed under a label that names the wall — worth more than any
+                # single word coincidence, and scaled by how much of the wall
+                # that label covers.
+                score += 3 * max(1, theme["names"])
+                reason = 'filed under %s "%s"' % (theme["kind"], theme["label"])
+            elif shared:
+                reason = "shares " + ", ".join(shared[:3])
+            else:
+                reason = "same site"
+            prev = best.get(key)
+            if prev and prev["score"] >= score:
+                return
+            best[key] = {"url": cand["url"], "title": title, "score": score,
+                         "reason": reason, "via": via}
+
+        for page, (vids, _tags) in mined.items():
+            for c in vids:
+                key = _norm_url(c["url"])
+                hit = on_theme.get(key)
+                offer(c, page, hit[1] if hit else None)
+        for key, (c, tg) in on_theme.items():
+            offer(c, tg["url"], tg)
+
+        items = list(best.values())
+        # Shuffle first, then a stable sort: equal scores come back in a
+        # different order every click instead of always the same tile.
+        random.shuffle(items)
+        items.sort(key=lambda c: -c["score"])
+        return self.send_json({
+            "ok": True,
+            "items": items[:want],
+            "pool": len(items),
+            "seeds_used": len(mined),
+            "fetched": fetches,
+            "themes": [{"label": t["label"], "kind": t["kind"],
+                        "names": t["names"]} for t in picked_themes],
+            "error": errors[0] if errors and not items else None,
+        })
+
+    # ---------- /api/shrink (tile-sized re-encode) ----------
+
+    def handle_shrink(self, qs):
+        """Re-encode an uploaded video down to the size its tile shows.
+
+        Takes an upload id (from /api/upload), starts a background encode and
+        returns its job id; the browser polls /api/shrink/status and then plays
+        the returned /api/localfile/ URL. A video already within the box is
+        reported back untouched, so re-running this over a light package costs
+        one probe per file and no encoding at all."""
+        if not FFMPEG:
+            return self.send_json({"ok": False, "error":
+                "ffmpeg not found on the server. Install it with "
+                "'pip install imageio-ffmpeg' (or add ffmpeg to PATH) and restart."}, 500)
+
+        fid = (qs.get("id") or [""])[0]
+        with _uploads_lock:
+            src = _uploads.get(fid)
+        if not src or not os.path.isfile(src):
+            src = _recover_upload(fid)   # the registry may be a restart younger
+        if not src:
+            return self.send_json({"ok": False, "error": "unknown upload id"}, 404)
+
+        def clamp(name, default, lo, hi):
+            try:
+                v = int(float((qs.get(name) or [str(default)])[0]))
+            except (TypeError, ValueError):
+                v = default
+            return max(lo, min(hi, v))
+
+        hbox = clamp("h", 432, 144, 2160)
+        fps_cap = clamp("fps", SHRINK_FPS, 10, 120)
+        drop = (qs.get("drop") or ["0"])[0] == "1"
+
+        info = probe_media(src)
+        if not info:
+            return self.send_json(
+                {"ok": False, "error": "could not read the video's format"}, 422)
+
+        src_ext = os.path.splitext(src)[1] or ".mp4"
+        origin = {"w": info["w"], "h": info["h"], "fps": round(info["fps"], 2),
+                  "dur": round(info["dur"], 2), "codec": info["codec"],
+                  "bytes": os.path.getsize(src)}
+
+        _, tw, th = _shrink_filters(info, hbox, fps_cap)
+        if not _shrink_needed(info, hbox, fps_cap):
+            return self.send_json({
+                "ok": True, "needed": False, "from": origin,
+                "url": "/api/localfile/%s/file%s" % (fid, src_ext),
+            })
+
+        job_id = uuid.uuid4().hex
+        now = time.time()
+        with _shrink_jobs_lock:
+            for jid in [k for k, v in _shrink_jobs.items()
+                        if now - v.get("ts", now) > SHRINK_JOB_TTL]:
+                _shrink_jobs.pop(jid, None)
+            _shrink_jobs[job_id] = {
+                "stage": "queued", "pct": 0.0, "error": None, "url": None,
+                "from": origin, "to": {"w": tw, "h": th}, "bytes": 0,
+                "encoder": None, "ts": now,
+            }
+
+        try:
+            os.makedirs(_UPLOAD_DIR, exist_ok=True)
+        except OSError:
+            pass
+        out = os.path.join(_UPLOAD_DIR, "shrink_%s.mp4" % job_id)
+
+        # The queue is waited on inside the worker, not here: the HTTP request
+        # must return the job id right away so the browser can show a row for
+        # every file, including the ones still waiting for an encoder slot.
+        def worker():
+            with _shrink_slots:
+                _run_shrink_job(job_id, src, out, info, hbox, fps_cap, drop)
+
+        threading.Thread(target=worker, daemon=True).start()
+        return self.send_json({"ok": True, "needed": True, "job_id": job_id,
+                               "from": origin, "to": {"w": tw, "h": th}})
+
+    def handle_shrink_status(self, qs):
+        job_id = (qs.get("id") or [""])[0]
+        with _shrink_jobs_lock:
+            job = _shrink_jobs.get(job_id)
+            snap = dict(job) if job else None
+        if not snap:
+            return self.send_json({"ok": False, "error": "unknown or expired job"}, 404)
+        return self.send_json({
+            "ok": True,
+            "stage": snap["stage"],
+            "pct": round(snap["pct"], 4),
+            "ready": snap["stage"] == "done",
+            "url": snap["url"],
+            "error": snap["error"],
+            "from": snap["from"],
+            "to": snap["to"],
+            "bytes": snap["bytes"],
+            "encoder": snap["encoder"],
+        })
+
     # ---------- /api/upload + /api/localfile (local videos) ----------
 
     def handle_upload(self, qs):
@@ -1923,6 +2716,8 @@ class Handler(BaseHTTPRequestHandler):
         with _uploads_lock:
             fpath = _uploads.get(fid)
         if not fpath or not os.path.isfile(fpath):
+            fpath = _recover_upload(fid)
+        if not fpath:
             return self.send_error(404, "not found")
 
         size = os.path.getsize(fpath)

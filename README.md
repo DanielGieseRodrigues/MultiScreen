@@ -73,6 +73,62 @@ Se o "Copiar endereço do vídeo" te deu algo assim, ele **não é um link** e n
 
 3. **Só o `blob:`** — o app pergunta à extensão qual stream aquela aba baixou. Depende de a aba ter sido carregada com a extensão ativa: se não achar, o aviso diz exatamente o que ela viu.
 
+## 🔗 Related — mais um vídeo parecido com os que já estão na tela
+
+Ninguém expõe uma API de "vídeos relacionados" que sirva pra vários sites. Mas toda página
+de vídeo já lista as recomendações **do próprio site** — então a parede é a consulta:
+
+**Onda 1 — o que a página oferece.** O servidor busca o HTML de uma das páginas de onde os
+tiles vieram e separa duas coisas:
+
+- **Links de vídeo**: só os que têm **a mesma forma de URL** da página onde foram achados.
+  É isso que distingue vídeo de categoria sem saber nada do site: `/video/<dígitos>/<slug>/`
+  é outro vídeo, `/tags/<nome>/` não é. Segmento com `:` é namespace (`Category:`), não título.
+- **Links de taxonomia**: `/tags/`, `/models/`, `/categories/`, `/characters/`, `/game/`,
+  `/studio/`, `/tagged/`… — ou seja, **como o site classificou aquele vídeo**.
+
+**Onda 2 — o tema da parede.** Cada rótulo é pontuado por **quantos títulos na tela ele
+nomeia**: a atriz, o personagem ou o jogo que fica voltando ganha. Com isso o servidor busca
+a **página-índice dos dois rótulos mais fortes** — em `/tags/shadowheart/` *todo* vídeo é do
+tema pelo critério do próprio site, o que é melhor do que qualquer palpite por palavra.
+
+**Ranqueamento.** Cada palavra vale quantos títulos da parede a contêm (o nome recorrente
+pesa mais que o que apareceu uma vez), pares de palavras adjacentes valem bônus, e vídeo que
+veio da página-índice do tema leva o bônus maior. Cada sugestão vem com o **motivo** —
+`filed under tags "Shadowheart"` ou `shares orin, bhaal` — e o motivo aparece no aviso.
+
+Cada clique adiciona um tile. As páginas ficam 10 min em cache (e as que falham, 2 min, pra
+não insistir numa tag bloqueada a cada clique), então só o primeiro clique paga requisição —
+e como o que já está na parede é excluído, os seguintes trazem coisas novas. Se nenhum tile
+atual tiver página pra raspar (parede só de arquivos locais, links diretos ou embeds), ele
+cai pras páginas de sites que você já usou.
+
+## Pacote (.zip) e o tamanho do tile
+
+**📦 Pack** baixa todos os vídeos da grade num único `.zip` (com o `multiscreen.json`
+dentro), pra reabrir depois sem re-resolver nada: sem rede, sem yt-dlp, sem link morto.
+
+Só que guardar os arquivos originais não resolve travamento — travamento é **decode**,
+não download. Um tile 4K60 custa ~500 Mpixel/s pra decodificar, uma RTX 3060 tem **um**
+motor NVDEC (satura com dois desses), e cada quadro decodificado é jogado fora pelo
+scaler ao entrar numa célula de ~400px. Dez tiles 4K60 é uma parede que não toca, não
+importa de onde vêm os bytes.
+
+Por isso o pacote é **re-encodado uma vez, no tamanho em que o tile aparece**:
+
+- **Tile size** (no modal do Pack) — `Auto` mede a célula nesta tela e neste número de
+  tiles e escolhe a faixa (360p…1080p); `Original` desliga o re-encode.
+- Sempre no máximo **30 fps** e **8-bit yuv420p** — 60 fps dobra o custo de decode de um
+  quadradinho, e fonte 10-bit/HDR não tem decoder de hardware no navegador.
+- Nunca aumenta: fonte menor que a faixa passa intacta.
+- **Shrink heavy videos when loading a package** faz o mesmo **ao carregar** um `.zip`
+  antigo — conserta os pacotes que você já tem, sem baixar nada de novo.
+
+Quem re-encoda é o servidor, com a GPU (`h264_nvenc`, ~3,5× tempo real numa fonte 4K60;
+cai pra `libx264` se a GPU recusar). Vinte tiles a 768x432/30 somam menos decode que um
+único stream 4K60 — e os arquivos ficam ~15× menores, o que também deixa cada reinício
+de loop 100% local.
+
 ## Como funciona
 
 - **`index.html`** — front-end (grade, players, controles). Reconhece localmente arquivos diretos, HLS e os embeds. Qualquer outro link é enviado ao back-end.
@@ -81,6 +137,12 @@ Se o "Copiar endereço do vídeo" te deu algo assim, ele **não é um link** e n
   - `GET /api/scan?url=[&origin=]` — acha os `<video>` da página; se todos forem `blob:`, o `.m3u8`/`.mpd` escondido no HTML do player; se nem isso, abre os iframes da página e repete lá dentro (`origin` = de qual iframe começar).
   - `GET /api/wrap?url=&ref=` — embrulha no proxy um stream que o navegador já achou (o que a extensão descobre atrás de um `blob:`).
   - `GET /api/proxy?p=` — repassa o vídeo com os cabeçalhos corretos (Referer/User-Agent), libera CORS e reescreve playlists HLS para tocarem no navegador.
+  - `POST /api/related` — recebe `{seeds, have, titles}` e devolve `{items, themes}`:
+    raspa as páginas dos próprios tiles, deduz o tema pelas tags do site e busca a
+    página-índice do tema pra achar mais do mesmo.
+  - `POST /api/shrink?id=&h=&fps=` — re-encoda um vídeo já enviado (`/api/upload`) para
+    caber num tile de `h` px de altura; devolve um `job_id`, e `GET /api/shrink/status?id=`
+    dá o progresso e a URL final. Arquivo que já cabe volta na hora, sem encodar.
 
 ## Limitações
 
