@@ -15,12 +15,18 @@ Cole a URL de qualquer vídeo e ele aparece num player da grade. Funciona com ar
 - **Tela cheia** da grade inteira ou de um player individual.
 - **Salvar / Carregar** a grade atual (fica no navegador via `localStorage`).
 - **Recarregar** um player individual (útil quando o stream trava no meio).
+- **↗ Link original** — cada tile tem um botão que abre, em outra guia, a página de onde aquele vídeo veio.
 - Botão de **mudo** global.
 - **🗂 Tabs** — adiciona **todas as guias abertas do navegador** de uma vez (requer a extensão companheira, veja abaixo).
+- **🎬 Compile** — corta trechos de qualquer tile e exporta tudo como um `.mp4` só. O **REC** de cada tile só aparece com o mouse em cima dele (e continua visível enquanto grava), pra não poluir a grade.
+- **🎯 Moments** — acha sozinho os momentos interessantes de cada tile (corte de cena, movimento e volume, medidos por ffmpeg aqui na máquina) e transforma em compilação.
+- **🧠 Search** — dentro do Moments: você escreve o que procura (`kiss, explosion, close-up of a face`) e o **CLIP roda local** pra achar os segundos parecidos, em cada tile. Grátis, offline, sem chave.
 
 ## Como rodar
 
 **Requisitos:** [Python 3](https://www.python.org/) e [yt-dlp](https://github.com/yt-dlp/yt-dlp) (`pip install yt-dlp`).
+
+**Opcional:** `pip install edge-tts` — libera ~160 vozes neurais (femininas e masculinas, 142 idiomas) no modo Trance, de graça e sem chave. Sem isso o Trance usa as vozes que o navegador já tem instaladas.
 
 ### Windows (mais fácil)
 
@@ -129,6 +135,274 @@ cai pra `libx264` se a GPU recusar). Vinte tiles a 768x432/30 somam menos decode
 único stream 4K60 — e os arquivos ficam ~15× menores, o que também deixa cada reinício
 de loop 100% local.
 
+## 🎯 Moments — o servidor acha os momentos
+
+Marcar uma compilação na mão significa assistir tudo antes. O botão **🎯 Moments** mede
+cada tile e marca os picos — **sem IA, sem serviço, sem nada pago**.
+
+São **duas passadas de nada** dentro de um único comando de ffmpeg, com o vídeo decodificado
+a 4 fps e 160 px de largura:
+
+- `scdet` devolve, por quadro, o `mafd` (o quanto a imagem mudou desde o quadro anterior =
+  **movimento**) e o score de **corte de cena**;
+- `ebur128` devolve o **volume momentâneo** (LUFS) do áudio.
+
+Pico de volume e de movimento é onde acontece alguma coisa; corte de cena é onde um clipe
+pode começar e terminar sem cortar um plano no meio. O servidor devolve só as curvas — um
+valor por segundo — e **quem escolhe os picos é o navegador**, então mudar a duração do
+clipe ou o equilíbrio áudio/movimento re-marca a parede inteira na hora, sem decodificar
+nada de novo.
+
+No painel:
+
+- **Clip length**, **Per video** e **Look for** (áudio, equilibrado ou movimento) re-marcam tudo instantaneamente.
+- Cada tile tem uma **linha do tempo**: área roxa = movimento, linha azul = volume, riscos = cortes de cena, blocos = os momentos marcados.
+- **Clique** na linha do tempo pula o vídeo pra lá; **arraste** pra marcar um trecho seu (fica amarelo e sobrevive a qualquer re-marcação).
+- **＋ Send to 🎬 Compile** joga tudo que está marcado na lista de cortes do Compile, que gera o `.mp4` como sempre.
+
+A medição é o custo: é uma decodificação inteira do vídeo (rápida, mas inteira), e por isso
+duas rodam por vez e o resultado fica **em cache no disco** — reabrir o painel, ou o mesmo
+vídeo semana que vem, sai de graça. Tile que já é arquivo local (upload, pacote `.zip`,
+shrink) é lido direto do disco, sem rede e sem yt-dlp.
+
+### 🧠 Search — descrever o momento em palavras
+
+O botão **🧠 Search**, dentro do Moments, responde a outra pergunta: não "onde acontece
+alguma coisa", e sim "onde acontece **isto**". É o [CLIP](https://openai.com/research/clip)
+da OpenAI rodando **na sua máquina** via `onnxruntime`:
+
+1. um quadro por segundo do vídeo vira um vetor (encoder de imagem) — o quadro **inteiro**,
+   encaixado no quadrado com barras cinza, e não o corte central, que jogaria fora 44% de
+   um frame 16:9;
+2. cada frase que você digitou vira um vetor pelo mesmo modelo (encoder de texto), passando
+   por quatro moldes (`"{}"`, `"a photo of {}"`, …) cuja média é um alvo mais estável;
+3. os dois se encontram num softmax contra frases-controle, e o resultado é a **fatia do
+   casamento** daquele segundo, de 0 a 1.
+
+Importante: com frases ativas a busca é **só imagem**. Volume e movimento são o outro motor
+(o 🔎 Analyze) e ficam de fora.
+
+Nada sai da máquina, não tem chave, não tem custo por requisição — só dois arquivos ONNX
+(~600 MB) baixados uma vez do Hugging Face, e a CPU ou a GPU que já estão aí. O painel
+oferece o download quando você usa a busca pela primeira vez.
+
+- Uma passada **por frase**: pedir `kiss, explosion, dancing` marca os melhores momentos de
+  cada uma, e não só os da frase mais forte — é assim que a compilação sai com **todos os
+  tipos** que você listou. Cada frase ganha uma cor, na linha do tempo e nos chips.
+- **Fit to the match**: o clipe dura o que a cena dura. O pico vira semente e as bordas
+  crescem enquanto o casamento segura metade do valor do pico (critério de meia-altura),
+  até 12× o "Clip length". É o que faz um trecho contínuo de 70 s sair como 70 s, e não
+  como um pedaço fixo de 8 s no meio dele. Desmarcado, volta a cortar no tamanho fixo.
+- **Confidence**: o número no chip (`94%`) é a fatia do casamento — cada segundo é
+  disputado entre as **suas** frases e uma dúzia de frases comuns ("a random video frame",
+  "an empty room", "text on a screen"…), e o que aparece é quanto a sua ganhou. Isso é uma
+  escala absoluta: distância bruta do CLIP não é. Frase que não está no vídeo fica em ~0 e
+  o painel diz **nothing matched "…"** em vez de marcar o segundo menos ruim.
+- **Model**: `B/32` (rápido), `B/16` (quadra a resolução dos patches, acha coisa menor) e
+  `L/14` (o bom, e vários vezes mais lento). Cada um baixa uma vez, na primeira vez que
+  você escolhe. Trocar de modelo invalida o índice — é outro espaço vetorial.
+- **Example** (o mais preciso): em vez de descrever, aponte **um tile que já mostra o tipo
+  de momento que você quer** — se for um edit pronto, melhor ainda. Cada segundo é comparado
+  com **todos os quadros** do exemplo e fica com os três melhores; a média deles é a nota.
+  (A primeira versão fazia a média dos quadros do exemplo primeiro — numa compilação com
+  várias cenas isso vira um borrão que não se parece com nenhuma. Medido nos vídeos reais,
+  a forma por quadro escolhe segundos claramente mais parecidos: 0.933 contra 0.922 de
+  semelhança com o exemplo, e 0.883 contra 0.855 entre si, sobre uma linha de base de
+  0.865/0.769 para segundos aleatórios.)
+- **`gap`** aparece ao lado de cada tile: é o espaço entre o segundo comum e o melhor
+  segundo daquele vídeo, em distância bruta do CLIP. É a medida honesta de se o modelo
+  conseguiu separar alguma coisa. Em material com a mesma pessoa, no mesmo cenário, o
+  **B/32 satura**: tudo fica entre 0.85 e 0.96 e o gap cai pra ~0.03. Aí a escala não é o
+  problema, é o encoder — suba pra **B/16** ou **L/14**.
+- **Margin**: guarda alguns segundos antes e depois do que foi achado, porque clipe que
+  começa exatamente no acontecimento parece corte seco. Padrão ±5 s.
+- **Per phrase = 1** é o padrão: normalmente é um momento por vídeo.
+- **⚡ Auto-edit**: um clique faz tudo — indexa/mede cada tile, fica com o que passa da
+  confiança escolhida, manda pro Compile e já exporta o `.mp4`.
+
+> **Uma frase por vez.** As frases dividem o mesmo softmax, então uma ampla ("a couple in
+> bed", 0.9 no vídeo inteiro) abafa a específica que você quer (0.05). Para um momento
+> preciso, busque uma frase de cada vez — ou use o Example.
+
+### 📺 A página inteira de uma atriz, sem abrir um vídeo
+
+A parede nunca foi o ponto da compilação — era só onde as URLs estavam. Cinquenta players
+tocando ao mesmo tempo é o que faz o navegador travar, e **nada disso é necessário**: dada a
+página da atriz, o yt-dlp lista os vídeos, o preset acha o momento em cada um, o ffmpeg junta.
+Nenhum player envolvido.
+
+No botão **📺 Channel**: cola a página (`pornhub.com/model/…`, canal, playlist), escolhe
+quantos vídeos e a resolução, e **⚡ Build the compilation**. A barra mostra o que está
+acontecendo — lendo a página, procurando no vídeo N de M, cortando o clipe N de M, juntando —
+e os clipes achados vão aparecendo com o tempo e a confiança de cada um enquanto rodam.
+
+O `Check` lê só a listagem (`extract_flat`), então são ~1 segundo para 60 vídeos: dá pra
+conferir que a página é a certa antes de começar o trabalho pesado.
+
+Detalhe que mudou por causa dessa escala: o `.mp4` pronto agora vai **direto do servidor pro
+disco** pelo próprio navegador. Antes ele era montado inteiro na memória da aba
+(`resp.blob()`), o que com cinquenta cortes é 1–2 GB numa aba já sobrecarregada.
+
+A escolha do trecho, que morava no JavaScript, foi portada para o servidor
+(`clip_pick_moment`) — o modo canal não tem navegador para rodá-la. O porte reproduz a
+calibração segundo a segundo: mesmos 3/4, zero falso positivo, mesmos tempos.
+
+### Um clique: compilação de um tipo de cena
+
+O caso real do Moments não é "buscar qualquer coisa", é **montar uma compilação de um tipo
+de cena só**, a partir dos vídeos que estão na parede. Para isso existe o seletor **preset**,
+e ele vem escolhido por padrão:
+
+1. escolha o preset (ex.: `Cumshot compilation`);
+2. **⚡ Auto-edit**.
+
+Pronto — cada tile é indexado, marcado, e o `.mp4` sai. Nada de digitar frase.
+
+Um preset é um par de bancos: as maneiras de **dizer** a cena e as cenas que **se confundem**
+com ela (sexo, oral, conversa, créditos, marca d'água). O segundo banco é o que importa: uma
+frase sozinha, disputando com alternativas genéricas, não separa o final de uma cena do resto
+da mesma cena. Cada segundo vira um softmax entre o protótipo positivo, os vizinhos
+confundíveis e o fundo comum — e o que sai é uma probabilidade, comparável entre vídeos.
+
+O preset também traz **onde procurar**. Medido nos seis vídeos de teste, com o preset
+`cumshot`:
+
+| trecho buscado | resultado |
+|---|---|
+| vídeo inteiro | picos em 0:23, 2:00, 2:27 — com 0.95 de confiança, e errados |
+| último terço | todo pico no fim, e a confiança separa: 0.93, 0.80, 0.77 contra 0.51, 0.48, 0.04 |
+
+Por isso o seletor **Where** existe e o preset já o posiciona. O `0.04` do último vídeo é a
+resposta certa para "esse aqui não termina assim" — e aparece como `nothing matched`.
+
+Para escrever um preset novo, é o dicionário `CLIP_PRESETS` no `server.py`: nome, janela,
+lista positiva, lista negativa. O painel lê a lista do servidor sozinho.
+
+#### Como o preset foi calibrado (e por que "o último", não "o maior")
+
+Seis vídeos com a resposta conhecida — quatro têm o momento, com o segundo exato; dois não
+têm nenhum. Todo ajuste abaixo foi decidido nesse conjunto, não no olho:
+
+| escolha | acertos | falsos positivos |
+|---|---|---|
+| pico global da curva | 2/4 | 0 |
+| **último trecho forte** (≥50% do pico) | **3/4** | **0** |
+
+A diferença é a invariante do formato: essa cena **fecha** o vídeo. Alguma coisa mais cedo
+quase sempre parece mais com as palavras do que a coisa real, então pegar o pico global erra.
+Pegar o último trecho que ainda pontua perto do topo acerta — e de quebra deixa os dois
+vídeos negativos ainda mais quietos (0.34 → 0.21), o que abriu espaço para baixar o corte de
+confiança para 25% com folga dos dois lados: negativos em 0.04 e 0.21, positivos em 0.35,
+0.72 e 0.78.
+
+Isso vive no preset (`"prefer": "last"`, `"gate": 0.25`), não no código do seletor — outro
+tipo de cena, com outra distribuição, traz os seus próprios números.
+
+Duas medidas que também saíram daí, e que valem para quem for escrever um preset novo:
+
+- **Banco largo demais piora.** Somar frases de corpo e de interno ao banco de rosto/boca
+  levou um dos negativos a disparar (0.47) sem consertar nenhum dos erros. Frase a mais não é
+  cobertura a mais, é diluição do protótipo.
+- **O erro que sobrou é de percepção, não de escolha.** No vídeo que ainda falha, o trecho
+  certo pontua 0.12 contra 0.45 do lugar errado: o B/32 não vê o que está lá. Isso não se
+  conserta com palavra.
+- **Mas modelo maior não é automaticamente melhor.** O B/16 enxerga justamente esse vídeo
+  (0.32 onde o B/32 lê 0.11) e fecharia em 4/4 — só que inventa um momento num vídeo que não
+  tem nenhum, e inventa com **0.56**, acima do verdadeiro mais fraco que ele resgatou. Não
+  existe corte que separe os dois. Para uma compilação, corte errado no arquivo final custa
+  mais que corte faltando, então o padrão continua no B/32: **3/4, zero falso positivo**. O
+  seletor de modelo está lá para quem preferir o contrário.
+
+### Quando o site começa a desconfiar
+
+Depois de uma rodada longa — dezenas de vídeos indexados e logo em seguida os mesmos
+segundos pedidos de novo para cortar — o site passa a responder com página de desafio em vez
+de vídeo. Isso chega como uma mensagem que parece outra coisa:
+
+```
+ERROR: [PornHub] …: PhantomJS not found, Please download it from https://phantomjs.org/…
+```
+
+Não falta programa nenhum: é o extrator do yt-dlp sendo recusado. Três coisas mudaram por
+causa disso, e as três valem para qualquer site que aperte:
+
+- **O corte tenta o stream resolvido antes do yt-dlp.** É o mesmo caminho que a indexação já
+  usa e que continuava funcionando enquanto o download falhava — sem extração nova, sem
+  baixar o arquivo inteiro. Medido: 43 s pedidos, 43 s entregues, em 7 segundos.
+- **A listagem lê o HTML da página quando o extrator é recusado.** O `_fetch_page_html` do
+  projeto já se comporta como navegador; os links estão na marcação. Em produção:
+  `CHANNEL extractor refused … reading the page instead` → 60 vídeos com títulos.
+- **O trecho que a indexação baixa não é mais descartado** (`multiscreen_spans`, teto de 8 GB,
+  limpeza por idade). Pedir os mesmos segundos duas vezes era metade do motivo de o site
+  endurecer.
+
+### Quatro caracteres que custam uma hora
+
+O índice é arquivado pelo hash do endereço, e o mesmo vídeo chega escrito de formas
+diferentes: o yt-dlp devolve `http://`, a marcação da página `https://`. Hash diferente,
+cache perdido, tudo medido de novo — sessenta vídeos, uma hora e meia. Agora as grafias
+conhecidas são procuradas antes de decidir que falta índice, e o novo é gravado sempre na
+forma canônica. A verificação que motivou isso:
+
+```
+dos 60 videos da pagina, 59 ja tem indice aproveitavel
+```
+
+### A ingestão: de onde vinham os índices pela metade
+
+Ler o stream assinado direto no ffmpeg era a origem de quase todo erro que parecia erro de
+modelo — o socket morre, o ffmpeg para, e os quadros que chegaram parecem o vídeo inteiro.
+Agora o vídeo é **baixado antes**, por yt-dlp, numa rendição pequena (480p; o CLIP olha 224
+px, baixar 1080p é desperdício), em três degraus: só a janela pedida, senão o arquivo
+inteiro, e só em último caso o stream ao vivo. Cada degrau confere o que recebeu contra o que
+foi pedido — e o que foi pedido nunca é medido pelo arquivo que chegou, senão um download
+cortado rebaixaria a própria régua.
+
+Há um relógio de parede em cima disso (`CLIP_FETCH_TIMEOUT`, 420 s): uma fonte que falha no
+ritmo certo — toda resposta cortada, toda retentativa avançando um pouco — mantém um
+downloader ocupado para sempre, e indexar é coisa que alguém está esperando.
+
+### Leitura curta: o erro que parece resposta errada
+
+Stream remoto assinado cai no meio da leitura o tempo todo. Antes, o ffmpeg saía, os quadros
+que já tinham vindo pareciam o vídeo completo, e um filme de 14 min ficava indexado até
+**0:30** — a busca então respondia com toda a confiança sobre o começo do vídeo, e parecia
+que o modelo é que estava errando.
+
+Agora as duas passadas (curvas e CLIP) **conferem o que leram** contra a duração que o
+próprio ffmpeg reporta, tentam de novo com o stream re-resolvido (o motivo quase sempre é o
+token expirado) e, se ainda ficar curto, **falham dizendo até onde deu** em vez de gravar
+cache pela metade. Índices curtos gravados por versões antigas são recusados na leitura e
+refeitos sozinhos. O painel também mostra `searched 12:34 of 21:46 ⚠` quando é o caso, e
+`-reconnect` foi ligado nas leituras http.
+
+O servidor agora registra cada busca no console — o que foi pedido, sobre quanto de vídeo,
+e onde ficou o pico:
+
+```
+  CLIP search [b32] 21:46 of video: cum on her face=0.84@9:02
+  CLIP like [b32] 17:58 of video, best 0.99 at 12:41
+  CLIP short read https://… : 0:30 of 14:03 (rc=1) - retrying
+```
+
+- **Group by phrase** (no rodapé) monta o `.mp4` em capítulos: todos os `kiss` de todos os
+  tiles, depois todos os `explosion`.
+- Apagar a caixa devolve a marcação pro modo corte de cena + movimento + volume.
+- Frases em **inglês** funcionam bem melhor — o CLIP foi treinado assim.
+
+O índice de um vídeo (um vetor por segundo, `float16`) fica em `~/.cache/multiscreen/clipidx`
+— ~3,7 MB por hora de vídeo — então buscar outra frase depois é instantâneo: só o texto é
+reprocessado. O modelo em si fica em `~/.cache/multiscreen/clip`.
+
+**Velocidade:** ~38 quadros/s no B/32 só na CPU desta máquina (um vídeo de 1 h indexa em
+~1,5 min); B/16 e L/14 são ~4× e ~10× mais lentos, e é aí que a GPU passa a valer.
+Pra usar a GPU: `pip install onnxruntime-directml` (ou `onnxruntime-gpu` com CUDA) e
+reiniciar — o servidor escolhe sozinho o melhor provider disponível e mostra qual está
+usando no painel.
+
+**Requisitos:** `pip install numpy onnxruntime`. Sem isso a busca por texto some do
+caminho e o resto do Moments continua funcionando normalmente.
+
 ## Como funciona
 
 - **`index.html`** — front-end (grade, players, controles). Reconhece localmente arquivos diretos, HLS e os embeds. Qualquer outro link é enviado ao back-end.
@@ -137,12 +411,33 @@ de loop 100% local.
   - `GET /api/scan?url=[&origin=]` — acha os `<video>` da página; se todos forem `blob:`, o `.m3u8`/`.mpd` escondido no HTML do player; se nem isso, abre os iframes da página e repete lá dentro (`origin` = de qual iframe começar).
   - `GET /api/wrap?url=&ref=` — embrulha no proxy um stream que o navegador já achou (o que a extensão descobre atrás de um `blob:`).
   - `GET /api/proxy?p=` — repassa o vídeo com os cabeçalhos corretos (Referer/User-Agent), libera CORS e reescreve playlists HLS para tocarem no navegador.
+  - `GET /api/voices?lang=&gender=` — lista as vozes neurais do Trance (edge-tts). O gênero vem
+    declarado pelo serviço, não adivinhado pelo primeiro nome. Devolve 503 se o edge-tts não
+    estiver instalado, e aí o front cai nas vozes do navegador.
+  - `GET /api/tts?text=&voice=&rate=&pitch=` — a frase em MP3, guardada em cache: um mantra em
+    loop só vai à rede na primeira vez que é falado.
   - `POST /api/related` — recebe `{seeds, have, titles}` e devolve `{items, themes}`:
     raspa as páginas dos próprios tiles, deduz o tema pelas tags do site e busca a
     página-índice do tema pra achar mais do mesmo.
   - `POST /api/shrink?id=&h=&fps=` — re-encoda um vídeo já enviado (`/api/upload`) para
     caber num tile de `h` px de altura; devolve um `job_id`, e `GET /api/shrink/status?id=`
     dá o progresso e a URL final. Arquivo que já cabe volta na hora, sem encodar.
+  - `POST /api/compile` — recebe `{cuts:[{url,start,end}], resolution}`, baixa só os trechos
+    pedidos, normaliza cada um e concatena; `GET /api/compile/status?id=` acompanha e
+    `GET /api/compile/result?id=` baixa o `.mp4`.
+  - `POST /api/analyze` — recebe `{url}` e mede o vídeo com ffmpeg (corte de cena, movimento
+    e volume), devolvendo um valor por segundo. Com `{probe:true}` só responde se a curva já
+    estiver em cache — abrir o painel numa parede de 40 tiles não dispara 40 medições.
+    `GET /api/analyze/status?id=` dá o progresso e `GET /api/analyze/result?id=` as curvas.
+  - `GET /api/clip/status` — o que a busca por texto consegue fazer agora: dependências,
+    modelo baixado, provider (CPU/DirectML/CUDA). `POST /api/clip/setup` baixa o modelo.
+  - `POST /api/clip/index` — passa o vídeo pelo encoder de imagem do CLIP e guarda um vetor
+    por segundo; `GET /api/clip/index/status?id=` acompanha.
+  - `POST /api/clip/similar` — recebe `{url, ref, model}` e devolve a curva de semelhança
+    com o tile de exemplo (softmax entre o exemplo e o quadro médio do próprio vídeo).
+  - `POST /api/clip/search` — recebe `{url, prompts:[…], model}` e devolve, por frase, a
+    fatia do casamento de cada segundo (softmax contra as frases-controle). Só multiplicação
+    de matriz em cima do índice: milissegundos, então trocar de frase é instantâneo.
 
 ## Limitações
 

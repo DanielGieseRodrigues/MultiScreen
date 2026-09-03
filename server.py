@@ -26,6 +26,44 @@ Serves the static app (index.html) and exposes a small API:
       sniffs the real .m3u8/.mpd behind a blob: player) into a proxied,
       CORS-enabled entry. Builds a proxy token; downloads nothing.
 
+  GET /api/voices[?lang=pt-BR][&gender=female]
+      The neural voice roster for Trance (edge-tts, free, no key). Gender
+      comes from the service, so "female" is a fact here, not a guess from
+      the first name. 503 when edge-tts isn't installed — the page then
+      falls back to the browser's own voices.
+
+  GET /api/tts?text=<phrase>&voice=<ShortName>[&rate=-25%][&pitch=-10Hz]
+      One phrase as MP3, memoised — a looping mantra only hits the network
+      the first time it is spoken.
+
+  POST /api/analyze   {url[, quality, duration, fresh, probe]}
+      Measures one video with ffmpeg — scene cuts, motion and loudness — and
+      returns one value per second, which is what the Moments panel marks the
+      good parts from. No model, nothing paid: a single 4 fps pass, cached on
+      disk. `probe` only answers whether the curve already exists, so opening
+      the panel on a 40-tile wall doesn't start 40 decodes.
+      Progress: GET /api/analyze/status?id=, curves: /api/analyze/result?id=.
+
+  POST /api/clip/index  {url, model}  +  POST /api/clip/search {url, prompts}
+      Zero-shot search inside a video, with OpenAI's CLIP running locally
+      through onnxruntime: one frame a second becomes a vector, your phrase
+      becomes one too, and a softmax against a dozen ordinary phrases turns
+      the pair into "how much of this second is what you asked for", 0..1 —
+      an absolute scale, so a phrase that isn't in the video reads as zero
+      instead of as the least bad second. Three model sizes (B/32, B/16,
+      L/14), each fetched once by POST /api/clip/setup; GET /api/clip/status
+      says what is ready. Optional: without numpy/onnxruntime the Moments
+      panel simply loses the text box and keeps working on scene cuts,
+      motion and loudness.
+
+  POST /api/channel/list      {url[, limit]}
+  POST /api/channel/compile   {url[, limit, preset, model, resolution]}
+      A performer or channel page in, one compilation out, with no browser in
+      the loop: yt-dlp lists the videos, each is indexed and scored against the
+      preset, the clip is picked server-side and ffmpeg joins them. Progress at
+      GET /api/channel/status?id=, and the file at /api/compile/result?id=
+      using the `compile_id` the status reports.
+
   GET /api/proxy?p=<base64>
       Pipes the video/manifest through the server, injecting the headers
       (Referer/User-Agent) the site requires and enabling CORS for the
@@ -37,6 +75,12 @@ With 12 videos all streaming through one port, half of them starve. So the
 server also listens on a few extra ports and spreads proxied streams across
 them round-robin.
 
+Optional extras:
+    pip install imageio-ffmpeg  # ffmpeg for Compile/Moments, if not on PATH
+    pip install edge-tts        # neural voices for Trance
+    pip install numpy onnxruntime          # search moments by describing them
+    pip install onnxruntime-directml       # ...on the GPU instead (Windows)
+
 Usage:
     python server.py            # port 8000 (+ proxy shards on 8001-8005)
     python server.py 8080       # custom port
@@ -44,6 +88,8 @@ Usage:
 
 import base64
 import collections
+import glob
+import hashlib
 import itertools
 import json
 import os
@@ -887,18 +933,20 @@ def _canonical_extractor_url(url):
     return url
 
 
-def resolve_stream(url, qmax):
+def resolve_stream(url, qmax, refresh=False):
     """Resolve a page/stream URL to a direct muxed (audio+video) stream.
 
     Returns a dict {title, stream_url, headers, isHls}. Results are cached (the
-    same cache used by /api/resolve). Raises ImportError if yt-dlp is missing,
-    or ResolveError with a helpful message on extraction failure.
+    same cache used by /api/resolve); `refresh` skips that cache, which is what
+    a reader that just died mid-stream needs — the token it was handed has
+    expired and re-reading it would fail the same way. Raises ImportError if
+    yt-dlp is missing, or ResolveError on extraction failure.
     """
     cache_key = (url, qmax)
     now = time.time()
     with _resolve_lock:
         hit = _resolve_cache.get(cache_key)
-        if hit and hit[0] > now:
+        if hit and hit[0] > now and not refresh:
             return hit[1]
 
     import yt_dlp  # ImportError bubbles up to the caller
@@ -1016,6 +1064,9 @@ def resolve_stream(url, qmax):
         "title": info.get("title") or info.get("webpage_url_basename") or url,
         "stream_url": stream_url,
         "headers": headers,
+        # Carried through because indexing needs it to turn "the last third"
+        # into seconds; a listing page does not report it.
+        "duration": float(info.get("duration") or 0),
         "isHls": is_hls(stream_url, info.get("protocol", "")),
         "impersonated": used_impersonation,
     }
@@ -1289,6 +1340,21 @@ _dl_locks = {}
 _dl_locks_guard = threading.Lock()
 
 
+def _reconnect_opts(src):
+    """Tell ffmpeg to reconnect instead of stopping when an http read drops.
+
+    A CDN closing the socket halfway through a long read used to end a
+    measuring pass silently: ffmpeg exits, the frames it did produce look like
+    a complete video, and the cached result covers the first thirty seconds of
+    a fourteen minute film. These options make it retry the read.
+    """
+    if not str(src).lower().startswith(("http://", "https://")):
+        return []
+    return ["-reconnect", "1", "-reconnect_streamed", "1",
+            "-reconnect_on_network_error", "1", "-reconnect_delay_max", "10",
+            "-rw_timeout", "30000000"]
+
+
 def _lock_for_url(url):
     with _dl_locks_guard:
         lk = _dl_locks.get(url)
@@ -1366,6 +1432,33 @@ def _download_section(url, start, end, qmax, tmpdir, index):
     return None
 
 
+# Whether a source carries sound, remembered per source: the concat step joins
+# clips with `-c copy`, and a clip with no audio track next to clips that have
+# one loses the sound of the whole compilation.
+_audio_probe = {}
+_audio_probe_lock = threading.Lock()
+
+
+def _source_has_audio(source, headers):
+    """True/False, or None when the probe itself failed (then don't force maps)."""
+    key = str(source)
+    with _audio_probe_lock:
+        if key in _audio_probe:
+            return _audio_probe[key]
+    cmd = [FFMPEG, "-hide_banner"] + _ffmpeg_input_opts(source, headers) + ["-i", source]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+        err = r.stderr or ""
+        found = bool(_AUD_RE.search(err)) if _VID_RE.search(err) else None
+    except Exception:  # noqa: BLE001
+        found = None
+    with _audio_probe_lock:
+        _audio_probe[key] = found
+        if len(_audio_probe) > 400:
+            _audio_probe.clear()
+    return found
+
+
 def _normalize_clip(source, headers, seek, dur, out, resolution, encoder):
     """Re-encode `source` to a uniform MPEG-TS clip so all clips concat cleanly.
 
@@ -1378,12 +1471,21 @@ def _normalize_clip(source, headers, seek, dur, out, resolution, encoder):
           "pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black,fps=30,format=yuv420p"
           % (w, h, w, h))
 
+    # A silent source gets a silent track, so every clip has exactly one video
+    # and one audio stream and the concat can stay a copy.
+    silent = _source_has_audio(source, headers) is False
+
     def build(enc):
         cmd = [FFMPEG, "-y", "-hide_banner", "-loglevel", "error"]
         if seek is not None:
             cmd += ["-ss", "%.3f" % seek]
         cmd += _ffmpeg_input_opts(source, headers)
+        cmd += _reconnect_opts(source)
         cmd += ["-i", source]
+        if silent:
+            cmd += ["-f", "lavfi", "-i",
+                    "anullsrc=channel_layout=stereo:sample_rate=48000",
+                    "-map", "0:v:0", "-map", "1:a:0", "-shortest"]
         if dur is not None:
             cmd += ["-t", "%.3f" % dur]
         cmd += ["-vf", vf]
@@ -1409,39 +1511,62 @@ def _normalize_clip(source, headers, seek, dur, out, resolution, encoder):
 def extract_cut(index, cut, tmpdir, resolution, qmax, encoder):
     """Produce one normalized MPEG-TS clip for a {url,start,end} cut.
 
-    Direct media (mp4/m3u8/local) → ffmpeg fast-seek (downloads only the span).
-    Everything else (YouTube/Twitch/…) → yt-dlp downloads the span, then we
-    normalize the local file. Returns (index, path_or_None, error_message).
+    Three ways in, in order of how well they hold up:
+
+    1. Direct media or a local file → ffmpeg seeks straight to the span.
+    2. A page → resolve it (the cache is usually warm) and let ffmpeg seek into
+       the stream. This is the same route indexing takes, and on sites that
+       answer a second extraction with a challenge page it is the one that
+       keeps working: no new extraction, no download of the whole file.
+    3. Only then yt-dlp's own section download, which handles DASH and merging
+       but asks the site for everything again.
+
+    Returns (index, path_or_None, error_message).
     """
     url = cut["url"]
     start = cut["start"]
     dur = cut["end"] - cut["start"]
     out = os.path.join(tmpdir, "seg_%03d.ts" % index)
+    problems = []
 
-    if _is_direct_media(url):
+    if _is_direct_media(url) or not url.lower().startswith(("http://", "https://")):
         ok, err = _normalize_clip(url, {}, start, dur, out, resolution, encoder)
         if ok:
             return index, out, ""
-        # A local path that failed can't be recovered; a hotlink-protected http
-        # file might still work through yt-dlp, so fall through in that case.
+        problems.append(err)
+        # A local path that failed cannot be recovered any other way.
         if not url.lower().startswith(("http://", "https://")):
             return index, None, err
 
-    # Resolve + download just the span with yt-dlp (handles 403/DASH/merging).
+    if url.lower().startswith(("http://", "https://")):
+        try:
+            info = resolve_stream(url, qmax)
+            ok, err = _normalize_clip(info["stream_url"], info.get("headers") or {},
+                                      start, dur, out, resolution, encoder)
+            if ok:
+                return index, out, ""
+            problems.append(err)
+        except Exception as e:  # noqa: BLE001
+            problems.append((str(e).splitlines() or ["resolve failed"])[-1])
+
     try:
         src = _download_section(url, start, cut["end"], qmax, tmpdir, index)
     except Exception as e:  # noqa: BLE001
-        msg = (str(e).splitlines() or ["download failed"])[-1]
-        return index, None, msg[:200]
+        problems.append((str(e).splitlines() or ["download failed"])[-1])
+        return index, None, " | ".join(p[:90] for p in problems[-2:])
     if not src:
-        return index, None, "yt-dlp produced no clip file"
+        problems.append("yt-dlp produced no clip file")
+        return index, None, " | ".join(p[:90] for p in problems[-2:])
 
     ok, err = _normalize_clip(src, {}, None, None, out, resolution, encoder)
     try:
         os.remove(src)
     except OSError:
         pass
-    return (index, out, "") if ok else (index, None, err)
+    if ok:
+        return index, out, ""
+    problems.append(err)
+    return index, None, " | ".join(p[:90] for p in problems[-2:])
 
 
 def _set_job(job_id, **fields):
@@ -1702,6 +1827,1705 @@ def _run_shrink_job(job_id, src, out, info, hbox, fps_cap, drop_src):
             except OSError:
                 pass
     _set_shrink(job_id, stage="error", error=(err or "encode failed")[:300])
+
+
+# ---------- /api/analyze (find the interesting moments, ffmpeg only) ----------
+
+# Marking a compilation by hand means watching everything first. This measures
+# the video instead, with no model and nothing paid: ONE ffmpeg pass, decoded at
+# 4 fps and 160 px wide, printing two cheap per-frame numbers — scdet's `mafd`
+# (how much the picture changed since the previous frame, i.e. motion) and its
+# scene score (a hard cut) — next to EBU R128 momentary loudness from the audio.
+# Peaks in loudness and motion are where something happens; scene cuts are where
+# a clip can start and end without slicing a shot in half.
+#
+# The server only produces the curves. The browser picks the peaks, so retuning
+# clip length or the audio/motion balance is instant instead of another decode.
+
+ANALYZE_FPS = 4
+ANALYZE_WIDTH = 160
+# Decoding competes with the wall's own playback; two at a time keeps the
+# machine usable while a batch of tiles is measured.
+ANALYZE_WORKERS = 2
+ANALYZE_JOB_TTL = 1800
+# Everything measured about a video — curves here, CLIP vectors later — is
+# expensive to produce and tiny to keep, so it lives in a real cache directory
+# instead of TEMP, where a cleanup would throw it away.
+MS_CACHE_HOME = os.path.join(os.path.expanduser("~"), ".cache", "multiscreen")
+ANALYZE_CACHE_DIR = os.path.join(MS_CACHE_HOME, "curves")
+ANALYZE_CACHE_TTL = 14 * 86400
+# Below this a scene score is camera shake or a flash, not a cut.
+ANALYZE_SCENE_MIN = 8.0
+# R128 reports digital silence as -120 LUFS; clamping keeps one silent gap from
+# flattening the normalisation of everything else.
+ANALYZE_SILENCE = -70.0
+# A full pass over a very long video is minutes of decoding — measure the first
+# four hours and stop.
+ANALYZE_MAX_SECONDS = 4 * 3600
+
+_analyze_jobs = {}
+_analyze_jobs_lock = threading.Lock()
+_analyze_slots = threading.BoundedSemaphore(ANALYZE_WORKERS)
+
+
+def _set_analyze(job_id, **fields):
+    with _analyze_jobs_lock:
+        job = _analyze_jobs.get(job_id)
+        if job:
+            job.update(fields)
+
+
+def _hms(seconds):
+    seconds = int(seconds or 0)
+    return "%d:%02d" % (seconds // 60, seconds % 60)
+
+
+def _analyze_cache_path(url, qmax):
+    key = hashlib.sha1(("%s|%s" % (url, qmax)).encode("utf-8")).hexdigest()
+    return os.path.join(ANALYZE_CACHE_DIR, key + ".json")
+
+
+def _analyze_cache_get(url, qmax):
+    path = _analyze_cache_path(url, qmax)
+    try:
+        if time.time() - os.path.getmtime(path) > ANALYZE_CACHE_TTL:
+            return None
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def _analyze_cache_put(url, qmax, data):
+    try:
+        os.makedirs(ANALYZE_CACHE_DIR, exist_ok=True)
+        with open(_analyze_cache_path(url, qmax), "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+def _analysis_source(url, qmax, refresh=False):
+    """What ffmpeg should open to measure `url`, as (source, headers, title).
+
+    A tile playing a local upload (or a restored package) is read straight off
+    disk — no network, no yt-dlp, and the pass runs at disk speed. A plain media
+    URL goes to ffmpeg as it is; anything else (a video page) goes through the
+    same resolve the player itself uses, which also carries the Referer/Cookie
+    headers the CDN wants.
+    """
+    m = re.search(r"/api/localfile/([0-9a-zA-Z]+)", url)
+    if m:
+        fid = m.group(1)
+        with _uploads_lock:
+            path = _uploads.get(fid)
+        if not path or not os.path.isfile(path):
+            path = _recover_upload(fid)
+        if path:
+            return path, {}, os.path.basename(path)
+
+    if not url.lower().startswith(("http://", "https://")):
+        if os.path.isfile(url):
+            return url, {}, os.path.basename(url)
+
+    if _is_direct_media(url):
+        return url, {}, url
+
+    info = resolve_stream(url, qmax, refresh=refresh)
+    return info["stream_url"], info.get("headers") or {}, info.get("title") or url
+
+
+def _parse_metadata_log(path, keys):
+    """Read an ffmpeg `metadata=print` log into {key: [(pts_time, value), …]}.
+
+    The filter prints a `frame:` header followed by one `key=value` line per
+    metadata entry on that frame, so the parse is a tiny state machine rather
+    than one regex — other filters in the chain may add keys of their own.
+    """
+    out = {k: [] for k in keys}
+    when = None
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if line.startswith("frame:"):
+                    m = re.search(r"pts_time:([\d.]+)", line)
+                    when = float(m.group(1)) if m else None
+                elif when is not None and "=" in line:
+                    key, _, val = line.strip().partition("=")
+                    if key in out:
+                        try:
+                            out[key].append((when, float(val)))
+                        except ValueError:
+                            pass
+    except OSError:
+        pass
+    return out
+
+
+def _analyze_pass(src, headers, tmpdir, want_audio, on_progress):
+    """Run the measuring pass over `src`. Returns (returncode, ffmpeg log).
+
+    Both metadata sinks write bare filenames into `tmpdir`, which is also the
+    process's working directory: a filter argument cannot carry a Windows path
+    without escaping the drive-letter colon twice over, and this sidesteps it.
+    """
+    graph = ("[0:v]fps=%d,scale=%d:-2,scdet=threshold=%.1f,"
+             "metadata=print:file=video.txt[v]"
+             % (ANALYZE_FPS, ANALYZE_WIDTH, ANALYZE_SCENE_MIN))
+    maps = ["-map", "[v]"]
+    if want_audio:
+        graph += (";[0:a]ebur128=metadata=1:peak=none,"
+                  "ametadata=print:key=lavfi.r128.M:file=audio.txt[a]")
+        maps += ["-map", "[a]"]
+
+    cmd = [FFMPEG, "-y", "-hide_banner", "-nostats", "-progress", "pipe:1"]
+    cmd += _ffmpeg_input_opts(src, headers)
+    cmd += _reconnect_opts(src)
+    cmd += ["-t", str(ANALYZE_MAX_SECONDS), "-i", src]
+    cmd += ["-filter_complex", graph] + maps + ["-f", "null", "-"]
+
+    log_path = os.path.join(tmpdir, "ffmpeg.log")
+    # Unbuffered: the job reads this log while ffmpeg still runs, to pick the
+    # source duration out of the header and turn seconds into a percentage.
+    with open(log_path, "wb", buffering=0) as errf:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errf,
+                                cwd=tmpdir, text=True, bufsize=1)
+        try:
+            for line in proc.stdout:
+                if line.startswith("out_time_us="):
+                    try:
+                        on_progress(int(line.split("=", 1)[1]) / 1e6, log_path)
+                    except ValueError:
+                        pass
+        finally:
+            try:
+                proc.stdout.close()
+            except OSError:
+                pass
+            proc.wait()
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            log = f.read()
+    except OSError:
+        log = ""
+    return proc.returncode, log
+
+
+def _log_duration(log_path):
+    """Source duration from a partially written ffmpeg log, or 0.0."""
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            m = _DUR_RE.search(f.read(8192))
+    except OSError:
+        return 0.0
+    if not m:
+        return 0.0
+    return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+
+
+def _analyze_curves(tmpdir):
+    """Turn the two metadata logs into one-second curves.
+
+    motion[i] is the mean frame difference over second i, loud[i] the loudest
+    momentary loudness in it (LUFS, floored at silence), and cuts the times a
+    scene actually changed. One value per second is enough to draw a timeline
+    and to pick peaks, and keeps an hour of video under 100 KB of JSON.
+    """
+    vmeta = _parse_metadata_log(os.path.join(tmpdir, "video.txt"),
+                                ("lavfi.scd.mafd", "lavfi.scd.score"))
+    mafd = vmeta["lavfi.scd.mafd"]
+    scene = vmeta["lavfi.scd.score"]
+    ameta = _parse_metadata_log(os.path.join(tmpdir, "audio.txt"),
+                                ("lavfi.r128.M",))
+    loudness = ameta["lavfi.r128.M"]
+
+    end = 0.0
+    for series in (mafd, loudness):
+        if series:
+            end = max(end, series[-1][0])
+    # No samples at all means ffmpeg never decoded a frame (a dead URL, a 403);
+    # empty curves are how the caller tells that apart from a silent video.
+    n = int(end) + 1 if (mafd or loudness) else 0
+
+    motion = [0.0] * n
+    seen = [0] * n
+    for when, val in mafd:
+        i = int(when)
+        if 0 <= i < n:
+            motion[i] += val
+            seen[i] += 1
+    motion = [round(motion[i] / seen[i], 2) if seen[i] else 0.0 for i in range(n)]
+
+    loud = [ANALYZE_SILENCE] * n
+    for when, val in loudness:
+        i = int(when)
+        if 0 <= i < n:
+            loud[i] = max(loud[i], max(ANALYZE_SILENCE, val))
+    loud = [round(v, 1) for v in loud]
+
+    cuts = sorted({round(when, 2) for when, val in scene if val >= ANALYZE_SCENE_MIN})
+
+    return {
+        "step": 1.0,
+        "duration": round(end, 2),
+        "motion": motion,
+        "loud": loud,
+        "cuts": cuts,
+        "hasAudio": bool(loudness),
+    }
+
+
+def _run_analyze_job(job_id, url, qmax, dur_hint):
+    """Background worker: resolve, measure, cache the curves.
+
+    A remote stream that dies halfway leaves curves that look complete and
+    describe only the beginning of the video, so the measured length is checked
+    against the length ffmpeg reported and a short pass is retried against a
+    freshly resolved stream.
+    """
+    tmpdir = tempfile.mkdtemp(prefix="msanalyze_")
+    _set_analyze(job_id, tmpdir=tmpdir)
+    try:
+        with _analyze_slots:
+            def progress(seconds, log_path):
+                with _analyze_jobs_lock:
+                    job = _analyze_jobs.get(job_id)
+                    if not job:
+                        return
+                    job["at"] = seconds
+                    known = job.get("dur") or 0.0
+                if not known:
+                    found = _log_duration(log_path)
+                    if found:
+                        _set_analyze(job_id, dur=found)
+
+            best = None
+            for attempt in range(2):
+                _set_analyze(job_id, stage="resolving")
+                try:
+                    src, headers, title = _analysis_source(url, qmax, refresh=attempt > 0)
+                except Exception as e:  # noqa: BLE001
+                    _set_analyze(job_id, stage="error",
+                                 error=(str(e).splitlines() or ["resolve failed"])[-1][:250])
+                    return
+
+                _set_analyze(job_id, stage="analyzing", at=0.0, dur=float(dur_hint or 0.0))
+                rc, log = _analyze_pass(src, headers, tmpdir, True, progress)
+                # A video with no audio track fails the filtergraph, not the
+                # decode: measure the picture on its own rather than give up.
+                if rc != 0 and "matches no streams" in log:
+                    rc, log = _analyze_pass(src, headers, tmpdir, False, progress)
+
+                data = _analyze_curves(tmpdir)
+                data["title"] = title
+                m = _DUR_RE.search(log)
+                expect = (int(m.group(1)) * 3600 + int(m.group(2)) * 60
+                          + float(m.group(3))) if m else float(dur_hint or 0.0)
+                if best is None or data["duration"] > best[0]["duration"]:
+                    best = (data, expect, log)
+                if data["motion"] and (not expect or data["duration"] >= expect * 0.9):
+                    break
+                sys.stderr.write("  ANALYZE short read %s: %s of %s (rc=%s)%s\n"
+                                 % (url[:60], _hms(data["duration"]), _hms(expect), rc,
+                                    " - retrying" if attempt == 0 else ""))
+
+            data, expect, log = best
+            if not data["motion"]:
+                tail = [l for l in log.strip().splitlines() if l.strip()][-1:] or ["no frames"]
+                _set_analyze(job_id, stage="error",
+                             error="could not read the video: " + tail[0][:200])
+                return
+            if expect and data["duration"] < expect * 0.9:
+                _set_analyze(job_id, stage="error",
+                             error="the stream stopped after %s of %s - measured only "
+                                   "the beginning, so nothing was cached. Try again, or "
+                                   "Pack the tile first."
+                                   % (_hms(data["duration"]), _hms(expect)))
+                return
+
+            _analyze_cache_put(url, qmax, data)
+            _set_analyze(job_id, stage="done", data=data)
+    except Exception as e:  # noqa: BLE001
+        _set_analyze(job_id, stage="error", error=str(e)[:200])
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# ---------- /api/clip (say what you are looking for, in words) ----------
+
+# The moments panel finds where something happens; this finds where the thing
+# you asked for happens. It is OpenAI's CLIP, run locally through onnxruntime:
+# one frame a second is turned into a 512-number vector, your prompt is turned
+# into a vector by the same model, and their dot product says how much that
+# second looks like those words. No service, no key, no per-request cost —
+# just two ONNX files (~600 MB, fetched once) and the CPU or GPU already here.
+#
+# Optional by design: without numpy/onnxruntime installed, or before the model
+# is downloaded, /api/clip/status says so and the panel keeps working on scene
+# cuts, motion and loudness alone.
+
+# Bumped whenever the front-end needs something this server did not have. The
+# panel checks it and says "restart the server" instead of failing at the first
+# call to an endpoint that does not exist yet.
+API_VERSION = 3
+
+CLIP_DIR = os.path.join(MS_CACHE_HOME, "clip")
+CLIP_INDEX_DIR = os.path.join(MS_CACHE_HOME, "clipidx")
+CLIP_HF = "https://huggingface.co/%s/resolve/main/"
+
+# Three sizes of the same idea. B/32 cuts a frame into 32-pixel patches — fast,
+# but a small thing in a corner is a fraction of one patch. B/16 quarters the
+# patch size for four times the work, and L/14 is the big one: much better at
+# "the moment where X happens", several times slower again. Sizes are the
+# integrity check — a half written model fails deep inside onnxruntime with an
+# unreadable error.
+CLIP_MODELS = {
+    "b32": {
+        "label": "ViT-B/32 · fast",
+        "repo": "Xenova/clip-vit-base-patch32",
+        "files": {"vision_model.onnx": ("onnx/vision_model.onnx", 351685709),
+                  "text_model.onnx": ("onnx/text_model.onnx", 254058553),
+                  "tokenizer.json": ("tokenizer.json", 2224119)},
+    },
+    "b16": {
+        "label": "ViT-B/16 · sharper",
+        "repo": "Xenova/clip-vit-base-patch16",
+        "files": {"vision_model.onnx": ("onnx/vision_model.onnx", 345060583),
+                  "text_model.onnx": ("onnx/text_model.onnx", 254058553),
+                  "tokenizer.json": ("tokenizer.json", 2224081)},
+    },
+    "l14": {
+        "label": "ViT-L/14 · best",
+        "repo": "Xenova/clip-vit-large-patch14",
+        "files": {"vision_model.onnx": ("onnx/vision_model.onnx", 1216438437),
+                  "text_model.onnx": ("onnx/text_model.onnx", 494947485),
+                  "tokenizer.json": ("tokenizer.json", 2224081)},
+    },
+}
+CLIP_DEFAULT_MODEL = "b32"
+CLIP_DEFAULT_PRESET = "cumshot"
+
+# A phrase on its own is a weak query: averaging the same phrase through a few
+# carriers is CLIP's own prompt-ensembling trick, and it costs four text
+# encodes (milliseconds) for a noticeably steadier curve.
+CLIP_TEMPLATES = ("{}", "a photo of {}", "a video frame of {}", "a screenshot of {}")
+
+# CLIP distances are not an absolute scale: "a plate of spaghetti" scores ~0.24
+# against every frame of a video that has no food in it, and there is no fixed
+# number above which a phrase is "present". What IS meaningful is the
+# competition — so each second is scored against your phrases AND a set of
+# ordinary ones, and what comes back is the share your phrase won. That reads
+# as a probability, is comparable between phrases, and lets a search answer
+# "nothing here matched" instead of confidently marking the least bad second.
+CLIP_BACKGROUND = (
+    "a random video frame",
+    "an ordinary scene",
+    "a black screen",
+    "a blurry image",
+    "text on a screen",
+    "a person standing still",
+    "an empty room",
+    "a wide landscape",
+    "a close-up of an object",
+    "a crowd of people",
+    "a menu or user interface",
+    "static noise",
+)
+
+# CLIP looks at 224 px. Downloading a 1080p copy to throw away 96% of every
+# pixel is pure cost, and the small rendition also arrives far faster.
+CLIP_INDEX_QUALITY = 480
+
+# Reading a signed CDN stream straight into ffmpeg is what kept ending an index
+# at 0:51 of 14:03: the socket dies, ffmpeg stops, and the frames that did
+# arrive look like a whole video. yt-dlp knows how to retry a fragment and how
+# to resume, so the file lands complete before the encoder ever sees it.
+CLIP_FETCH_WITH_YTDLP = True
+# A source that fails in the right rhythm — every response cut short, every
+# retry making a little progress — can keep a downloader busy forever. Indexing
+# is something a person is waiting on, so it gets a wall clock.
+CLIP_FETCH_TIMEOUT = 420
+CLIP_FETCH_SOCKET_TIMEOUT = 20
+
+# Indexing downloads the stretch a clip will be cut from and then, until now,
+# threw it away — so cutting asked the site for the same seconds all over
+# again. Fifty videos indexed and then fifty spans re-requested is what makes a
+# site start answering with a challenge page instead of video ("PhantomJS is
+# required"), and it is pure waste besides. Keep the file; cut from disk.
+SPAN_DIR = os.path.join(tempfile.gettempdir(), "multiscreen_spans")
+SPAN_CACHE_BYTES = 8 * 1024 * 1024 * 1024
+SPAN_TTL = 6 * 3600
+
+
+def _span_path(url, window, ext=".mp4"):
+    key = hashlib.sha1(url.encode("utf-8")).hexdigest()
+    return os.path.join(SPAN_DIR, "%s.%s%s" % (key, _window_tag(window), ext))
+
+
+def span_prune():
+    """Keep the kept material bounded: oldest out first, by age then by size."""
+    try:
+        files = [(os.path.getmtime(f), os.path.getsize(f), f)
+                 for f in glob.glob(os.path.join(SPAN_DIR, "*"))]
+    except OSError:
+        return
+    now = time.time()
+    total = 0
+    for mtime, size, path in sorted(files, reverse=True):
+        if now - mtime > SPAN_TTL or total + size > SPAN_CACHE_BYTES:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        else:
+            total += size
+
+# A preset is a scene type worth building a compilation out of: a bank of ways
+# to say the thing, and — carrying just as much weight — a bank of the scenes
+# that get mistaken for it. A single phrase competing against generic
+# alternatives cannot separate the finish of a scene from the rest of the same
+# scene; naming the neighbours is what draws that line.
+#
+# `window` is where the type tends to live: this one closes a video, so the
+# search starts at 60% and the front-end offers that by default.
+CLIP_PRESETS = {
+    "cumshot": {
+        "label": "Cumshot compilation",
+        "window": [0.6, 1.0],
+        # This scene closes a video and runs to the end, so the clip to keep is
+        # the LAST strong stretch, not the strongest one. Measured against six
+        # videos with known answers, that single rule took the run from two
+        # right out of four to three, and made the two videos that must stay
+        # quiet quieter (0.34 -> 0.21).
+        "prefer": "last",
+        # Measured on six videos with known answers: the two that must stay
+        # quiet peak at 0.04 and 0.21, the three found ones at 0.41, 0.72 and
+        # 0.78, and the one this model cannot see at 0.33. Anything from 0.25
+        # to 0.40 scores the same, and 0.35 is the value that turns that last
+        # one into an honest silence instead of a wrong clip in the export.
+        "gate": 0.35,
+        # Left on the default encoder deliberately. B/16 sees the one scene
+        # B/32 is blind to (0.32 where B/32 reads 0.11), but it also invents one
+        # in a video that has no such scene at all, and at 0.56 — higher than
+        # the true match it rescued, so no threshold separates them. For a
+        # compilation, a wrong clip in the export costs more than a missing one.
+        "model": "",
+        "positive": [
+            "a man ejaculating",
+            "the moment of ejaculation",
+            "semen on a woman's face",
+            "cum on her face",
+            "cum in her mouth",
+            "cum on her tongue",
+            "a woman's face covered in semen",
+            "semen dripping down her chin",
+        ],
+        "negative": [
+            "a couple having sex",
+            "oral sex",
+            "a woman undressing",
+            "a couple kissing",
+            "a woman talking to the camera",
+            "a woman posing for the camera",
+            "an empty bed",
+            "the closing credits of a video",
+            "a website logo or watermark",
+        ],
+    },
+}
+
+# Bumped whenever the frames fed to the model change, so old vectors are not
+# silently compared against differently-prepared new ones.
+CLIP_INDEX_VERSION = "v3"
+# One frame a second: CLIP looks at a still, and a second is already finer than
+# any clip you would cut by hand.
+CLIP_FPS = 1.0
+# Frames per forward pass. Bigger batches barely help on CPU and cost memory.
+CLIP_BATCH = 16
+CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
+CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
+CLIP_CONTEXT = 77
+
+_clip_lock = threading.Lock()
+_clip_sessions = {}                 # file name -> onnxruntime session
+_clip_provider = ""
+_clip_tokenizer = None
+_clip_bpe_cache = {}
+_clip_text_cache = {}               # prompt -> unit vector
+_clip_setup = {"stage": "idle", "at": 0, "total": 0, "error": "", "file": ""}
+_clip_jobs = {}
+_clip_jobs_lock = threading.Lock()
+# One index at a time: the encoder saturates whatever it runs on, and two at
+# once only makes both slower.
+_clip_slots = threading.BoundedSemaphore(1)
+
+# CLIP's own pre-tokenizer split, with \p{L}/\p{N} written the way Python's re
+# spells them ([^\W\d_] is "a letter", \d one digit at a time).
+_CLIP_TOK_RE = re.compile(
+    r"<\|startoftext\|>|<\|endoftext\|>|'s|'t|'re|'ve|'m|'ll|'d"
+    r"|[^\W\d_]+|\d|(?:[^\s\w]|_)+", re.IGNORECASE)
+
+
+def _clip_deps():
+    """(numpy, onnxruntime) or (None, None) — both are optional extras."""
+    try:
+        import numpy
+        import onnxruntime
+        return numpy, onnxruntime
+    except ImportError:
+        return None, None
+
+
+def clip_model(name):
+    """The config for a model id, falling back to the default."""
+    return CLIP_MODELS.get(name) or CLIP_MODELS[CLIP_DEFAULT_MODEL]
+
+
+def clip_model_id(name):
+    return name if name in CLIP_MODELS else CLIP_DEFAULT_MODEL
+
+
+def _clip_model_dir(model):
+    return os.path.join(CLIP_DIR, clip_model_id(model))
+
+
+def _clip_migrate_flat():
+    """Move a pre-multi-model download (files straight in clip/) into b32/."""
+    target = os.path.join(CLIP_DIR, "b32")
+    for name, (_p, size) in CLIP_MODELS["b32"]["files"].items():
+        flat = os.path.join(CLIP_DIR, name)
+        try:
+            if os.path.getsize(flat) != size:
+                continue
+        except OSError:
+            continue
+        try:
+            os.makedirs(target, exist_ok=True)
+            os.replace(flat, os.path.join(target, name))
+        except OSError:
+            pass
+
+
+def _clip_missing(model):
+    """Model files that are absent or the wrong size."""
+    out = []
+    folder = _clip_model_dir(model)
+    for name, (_path, size) in clip_model(model)["files"].items():
+        try:
+            if os.path.getsize(os.path.join(folder, name)) != size:
+                out.append(name)
+        except OSError:
+            out.append(name)
+    if out and clip_model_id(model) == "b32":
+        _clip_migrate_flat()
+        return [n for n in out
+                if _file_size(os.path.join(folder, n)) != clip_model(model)["files"][n][1]]
+    return out
+
+
+def _file_size(path):
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return -1
+
+
+def _clip_download(model):
+    """Fetch one model's files once, reporting progress into _clip_setup."""
+    model = clip_model_id(model)
+    files = clip_model(model)["files"]
+    folder = _clip_model_dir(model)
+    missing = _clip_missing(model)
+    total = sum(files[n][1] for n in missing)
+    _clip_setup.update({"stage": "downloading", "at": 0, "total": total,
+                        "error": "", "file": "", "model": model})
+    done = 0
+    try:
+        os.makedirs(folder, exist_ok=True)
+        for name in missing:
+            path, size = files[name]
+            _clip_setup["file"] = name
+            tmp = os.path.join(folder, name + ".part")
+            req = urllib.request.Request(CLIP_HF % clip_model(model)["repo"] + path,
+                                         headers={"User-Agent": DEFAULT_UA})
+            with urllib.request.urlopen(req, timeout=60) as resp, open(tmp, "wb") as f:
+                while True:
+                    chunk = resp.read(1 << 20)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    done += len(chunk)
+                    _clip_setup["at"] = done
+            if os.path.getsize(tmp) != size:
+                os.remove(tmp)
+                raise IOError("%s came down the wrong size" % name)
+            os.replace(tmp, os.path.join(folder, name))
+        _clip_setup.update({"stage": "done", "file": ""})
+    except Exception as e:  # noqa: BLE001
+        _clip_setup.update({"stage": "error", "error": str(e)[:200]})
+
+
+def _clip_session(model, name):
+    """Lazily open an ONNX session, on the best provider this install has."""
+    model = clip_model_id(model)
+    key = model + "/" + name
+    with _clip_lock:
+        if key in _clip_sessions:
+            return _clip_sessions[key]
+        _np, ort = _clip_deps()
+        if ort is None:
+            raise RuntimeError("onnxruntime is not installed")
+        if _clip_missing(model):
+            raise RuntimeError("the %s model has not been downloaded yet"
+                               % clip_model(model)["label"])
+        avail = ort.get_available_providers()
+        # CUDA and DirectML both offload to the GPU; DirectML needs no CUDA
+        # toolkit, which on Windows is usually the shorter road.
+        for prov in ("CUDAExecutionProvider", "DmlExecutionProvider", "CPUExecutionProvider"):
+            if prov not in avail:
+                continue
+            try:
+                sess = ort.InferenceSession(os.path.join(_clip_model_dir(model), name),
+                                            providers=[prov])
+            except Exception:  # noqa: BLE001
+                continue
+            global _clip_provider
+            _clip_provider = prov
+            _clip_sessions[key] = sess
+            return sess
+        raise RuntimeError("onnxruntime has no usable execution provider")
+
+
+# ---- tokenizer (the CLIP BPE, straight from tokenizer.json) ----
+
+def _clip_byte_encoder():
+    bs = (list(range(ord("!"), ord("~") + 1)) + list(range(ord("¡"), ord("¬") + 1))
+          + list(range(ord("®"), ord("ÿ") + 1)))
+    cs = bs[:]
+    n = 0
+    for b in range(256):
+        if b not in bs:
+            bs.append(b)
+            cs.append(256 + n)
+            n += 1
+    return {b: chr(c) for b, c in zip(bs, cs)}
+
+
+def _clip_vocab(model):
+    global _clip_tokenizer
+    if _clip_tokenizer is None:
+        with open(os.path.join(_clip_model_dir(model), "tokenizer.json"),
+                  encoding="utf-8") as f:
+            tk = json.load(f)
+        merges = {}
+        for i, m in enumerate(tk["model"]["merges"]):
+            pair = tuple(m.split(" ")) if isinstance(m, str) else tuple(m)
+            merges[pair] = i
+        _clip_tokenizer = (tk["model"]["vocab"], merges, _clip_byte_encoder())
+    return _clip_tokenizer
+
+
+def _clip_bpe(word, merges):
+    """Merge a word's characters by learned rank until nothing merges."""
+    hit = _clip_bpe_cache.get(word)
+    if hit is not None:
+        return hit
+    parts = list(word)
+    parts[-1] += "</w>"
+    while len(parts) > 1:
+        rank, i = min((merges.get((parts[j], parts[j + 1]), 1 << 30), j)
+                      for j in range(len(parts) - 1))
+        if rank == 1 << 30:
+            break
+        parts[i:i + 2] = [parts[i] + parts[i + 1]]
+    _clip_bpe_cache[word] = parts
+    return parts
+
+
+def clip_tokenize(text, model=CLIP_DEFAULT_MODEL):
+    vocab, merges, enc = _clip_vocab(model)
+    text = re.sub(r"\s+", " ", text).strip().lower()
+    ids = [vocab["<|startoftext|>"]]
+    for tok in _CLIP_TOK_RE.findall(text):
+        word = "".join(enc[b] for b in tok.encode("utf-8"))
+        for piece in _clip_bpe(word, merges):
+            ids.append(vocab.get(piece, vocab["<|endoftext|>"]))
+    return ids[:CLIP_CONTEXT - 1] + [vocab["<|endoftext|>"]]
+
+
+def clip_text_vector(prompt, model=CLIP_DEFAULT_MODEL):
+    """Unit vector for one prompt, memoised — prompts repeat across tiles.
+
+    The phrase is encoded through several carrier sentences and the results
+    averaged (CLIP's prompt ensembling): a bare noun and "a photo of" that noun
+    land in slightly different places, and the mean of both is a steadier
+    target than either.
+    """
+    model = clip_model_id(model)
+    key = (model, prompt.strip().lower())
+    hit = _clip_text_cache.get(key)
+    if hit is not None:
+        return hit
+    np, _ort = _clip_deps()
+    sess = _clip_session(model, "text_model.onnx")
+    acc = None
+    for tpl in CLIP_TEMPLATES:
+        ids = np.array([clip_tokenize(tpl.format(key[1]), model)], dtype=np.int64)
+        vec = sess.run(None, {"input_ids": ids})[0][0].astype(np.float32)
+        vec /= (float(np.linalg.norm(vec)) + 1e-8)
+        acc = vec if acc is None else acc + vec
+    acc /= (float(np.linalg.norm(acc)) + 1e-8)
+    _clip_text_cache[key] = acc
+    return acc
+
+
+# ---- indexing a video ----
+
+def _window_tag(window):
+    """'full' or e.g. 'w67-100' — part of the cache key, since an index that
+    only covers the end of a video must never be served as the whole thing."""
+    if not window or (window[0] <= 0.001 and window[1] >= 0.999):
+        return "full"
+    return "w%d-%d" % (round(window[0] * 100), round(window[1] * 100))
+
+
+def _index_url_forms(url):
+    """The spellings of one video address that should share an index.
+
+    The same video arrives written differently depending on who listed it —
+    yt-dlp hands back http://, a page's own markup https://, and a hand-pasted
+    link may carry either. Hashing the raw string then measures the same video
+    two or three times over: an hour of work thrown away because of four
+    characters. The first form is the one new indexes are filed under; the rest
+    are looked at before deciding something is missing.
+    """
+    forms = []
+    if url.startswith("http://"):
+        forms = ["https://" + url[7:], url]
+    elif url.startswith("https://"):
+        forms = [url, "http://" + url[8:]]
+    else:
+        forms = [url]
+    seen, out = set(), []
+    for form in forms:
+        if form not in seen:
+            seen.add(form)
+            out.append(form)
+    return out
+
+
+def _clip_index_path(url, model, window=None):
+    # The tile's playback quality is not part of this any more: indexing always
+    # fetches the same small rendition, so two tiles of one video share a file.
+    key = hashlib.sha1(_index_url_forms(url)[0].encode("utf-8")).hexdigest()
+    return os.path.join(CLIP_INDEX_DIR, "%s.%s.%s.%s.npy"
+                        % (key, clip_model_id(model), _window_tag(window),
+                           CLIP_INDEX_VERSION))
+
+
+def _clip_index_existing(url, model, window=None):
+    """The index file for this video whichever way its address is written."""
+    for form in _index_url_forms(url):
+        key = hashlib.sha1(form.encode("utf-8")).hexdigest()
+        path = os.path.join(CLIP_INDEX_DIR, "%s.%s.%s.%s.npy"
+                            % (key, clip_model_id(model), _window_tag(window),
+                               CLIP_INDEX_VERSION))
+        if os.path.exists(path):
+            return path
+    return _clip_index_path(url, model, window)
+
+
+def _clip_meta_path(url, model, window=None):
+    return _clip_index_path(url, model, window)[:-4] + ".json"
+
+
+def _clip_meta_existing(url, model, window=None):
+    return _clip_index_existing(url, model, window)[:-4] + ".json"
+
+
+def _clip_meta_read(url, model, window=None):
+    try:
+        with open(_clip_meta_existing(url, model, window), encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def clip_index_load(url, model, window=None):
+    """The cached vectors for a video, or None if there are none worth using.
+
+    An index cached before the coverage check existed (or by an older build)
+    can cover a fraction of the video. When the measured curves know how long
+    the video really is, a short index is treated as absent so it is rebuilt —
+    silently answering about the first minute of an hour is the worst failure
+    this feature has.
+    """
+    np, _ort = _clip_deps()
+    if np is None:
+        return None
+    try:
+        vecs = np.load(_clip_index_existing(url, model, window))
+    except (OSError, ValueError):
+        return None
+    # What the video is really worth: the length written beside the index when
+    # it was built, or failing that whatever the measured curves know. Without
+    # this, a short index cached in an older session quietly outlives it.
+    meta = _clip_meta_read(url, model, window) or {}
+    known = meta.get("expect") or 0
+    if not known and _window_tag(window) == "full":
+        known = (_analyze_cache_get(url, 0) or {}).get("duration") or 0
+    if known and len(vecs) / CLIP_FPS < known * 0.9:
+        sys.stderr.write("  CLIP index for %s covers %s of %s - reindexing\n"
+                         % (url[:60], _hms(len(vecs) / CLIP_FPS), _hms(known)))
+        return None
+    return vecs
+
+
+def _clip_frames(src, headers, tmpdir, on_frame, seek=None, take=None):
+    """Feed 224x224 RGB frames, one per second, to `on_frame`.
+
+    ffmpeg does the whole CLIP preprocessing itself — sample, scale the short
+    side to 224 bicubic, centre crop — and writes raw RGB down a pipe, so no
+    image library is involved and nothing hits the disk.
+    """
+    # Fit the WHOLE frame into the square and pad the rest grey. The obvious
+    # alternative, cropping to the centre square, throws away 44% of a 16:9
+    # frame — and whatever you are looking for is often exactly there.
+    vf = ("fps=%g,scale=224:224:force_original_aspect_ratio=decrease:flags=bicubic,"
+          "pad=224:224:(ow-iw)/2:(oh-ih)/2:color=0x727272,format=rgb24" % CLIP_FPS)
+    cmd = [FFMPEG, "-hide_banner", "-nostats"]
+    if seek:
+        cmd += ["-ss", "%.3f" % seek]
+    cmd += _ffmpeg_input_opts(src, headers)
+    cmd += _reconnect_opts(src)
+    cmd += ["-t", "%.3f" % (take or ANALYZE_MAX_SECONDS), "-i", src, "-vf", vf,
+            "-an", "-f", "rawvideo", "-"]
+    size = 224 * 224 * 3
+    # stderr goes to a file, not a pipe: a long remote read can print more than
+    # a pipe buffer holds, and a full pipe would deadlock the reader below.
+    log_path = os.path.join(tmpdir, "ffmpeg.log")
+    with open(log_path, "wb", buffering=0) as errf:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errf)
+        try:
+            while True:
+                buf = proc.stdout.read(size)
+                if not buf or len(buf) < size:
+                    break
+                on_frame(buf)
+        finally:
+            try:
+                proc.stdout.close()
+            except OSError:
+                pass
+            proc.wait()
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            err = f.read()
+    except OSError:
+        err = ""
+    return proc.returncode, err, _log_duration(log_path)
+
+
+def _download_for_index(url, tmpdir, span=None):
+    """Bring a video (or one span of it) down with yt-dlp, video only.
+
+    Sound plays no part in indexing and a separate audio stream would only add
+    a merge step, so this asks for a video-only rendition no taller than the
+    encoder can use. Returns a path or None.
+    """
+    import yt_dlp
+    from yt_dlp.utils import download_range_func
+
+    deadline = time.time() + CLIP_FETCH_TIMEOUT
+
+    def watchdog(_status):
+        # Raised from inside the download loop, which is the only place able to
+        # stop it; yt-dlp has no timeout of its own.
+        if time.time() > deadline:
+            raise yt_dlp.utils.DownloadError(
+                "gave up after %ds - the source is not delivering" % CLIP_FETCH_TIMEOUT)
+
+    q = CLIP_INDEX_QUALITY
+    opts = {
+        "quiet": True, "no_warnings": True, "noprogress": True, "noplaylist": True,
+        "logger": _YdlLogger(),
+        "format": ("bv*[height<=%d]/wv*[height<=%d]/best[height<=%d]/best" % (q, q, q)),
+        "outtmpl": {"default": os.path.join(tmpdir, "idx.%(ext)s")},
+        "retries": 3,
+        "fragment_retries": 5,
+        "socket_timeout": CLIP_FETCH_SOCKET_TIMEOUT,
+        "progress_hooks": [watchdog],
+    }
+    if span:
+        opts["download_ranges"] = download_range_func(None, [span])
+    if _IMPERSONATE is not None:
+        opts["impersonate"] = _IMPERSONATE
+    if FFMPEG_DIR:
+        opts["ffmpeg_location"] = FFMPEG_DIR
+
+    with _lock_for_url(url):
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.download([_canonical_extractor_url(url)])
+    for name in sorted(os.listdir(tmpdir)):
+        if name.startswith("idx."):
+            path = os.path.join(tmpdir, name)
+            if os.path.getsize(path) > 0:
+                return path
+    return None
+
+
+def _clip_fetch(url, window, dur_hint, tmpdir, refresh):
+    """What to hand the encoder, as (source, headers, seek, take, offset, expected, note).
+
+    `offset` is where the returned material starts inside the original video,
+    so a curve built from the last third still reports real timestamps.
+
+    A local file is read where it lies. Anything remote is downloaded first —
+    reading a signed stream live is what kept truncating these indexes at
+    0:51 of 14:03, while yt-dlp retries fragments instead of stopping. Three
+    steps, each a fallback for the one before: just the window, then the whole
+    file, then the live stream that used to be the only option.
+    """
+    src, headers, _title = _analysis_source(url, CLIP_INDEX_QUALITY, refresh=refresh)
+    local = not str(src).lower().startswith(("http://", "https://"))
+
+    duration = float(dur_hint or 0)
+    if not duration and local:
+        duration = (probe_media(src) or {}).get("dur") or 0
+    if not duration and not local:
+        # The extraction that just produced `src` knew the length; it is sitting
+        # in the resolve cache, so this costs nothing and saves downloading the
+        # whole video because the window could not be worked out.
+        try:
+            duration = float(resolve_stream(url, CLIP_INDEX_QUALITY).get("duration") or 0)
+        except Exception:  # noqa: BLE001
+            duration = 0.0
+
+    start, end = 0.0, 0.0
+    if window and duration:
+        start = max(0.0, duration * float(window[0]))
+        end = min(duration, duration * float(window[1]))
+        if end - start < 5:
+            start, end = 0.0, 0.0
+    span_len = (end - start) if end else 0.0
+
+    # When the duration is unknown the window cannot be turned into seconds, so
+    # the whole video is read. Saying so keeps it from being filed away as if it
+    # were the window that was asked for.
+    applied = window if span_len else None
+
+    if local:
+        return (src, {}, start or None, span_len or None, start,
+                span_len or duration, "local", applied)
+
+    # What this fetch owes the caller, whatever route it takes. Deliberately NOT
+    # measured from the file that comes back: a download cut short would then
+    # lower the bar it is about to be judged against, and a six second file
+    # would pass as a thirty-four second window.
+    expect = span_len or duration
+
+    if CLIP_FETCH_WITH_YTDLP:
+        for label, span in (("span", (start, end) if end else None), ("full", None)):
+            if label == "span" and span is None:
+                continue
+            try:
+                got = _download_for_index(url, tmpdir, span)
+            except Exception as e:  # noqa: BLE001
+                got = None
+                sys.stderr.write("  CLIP %s download failed (%s)\n"
+                                 % (label, str(e).splitlines()[-1][:110]))
+            if not got:
+                continue
+            # Move it out of the scratch directory, which is about to be
+            # deleted, into the cache the cutting step reads from.
+            try:
+                os.makedirs(SPAN_DIR, exist_ok=True)
+                kept = _span_path(url, window if label == "span" else None,
+                                  os.path.splitext(got)[1] or ".mp4")
+                os.replace(got, kept)
+                got = kept
+            except OSError:
+                pass
+            got_len = (probe_media(got) or {}).get("dur") or 0
+            if label == "span":
+                # The file is meant to BE the window. If it came back short,
+                # say so and let the whole-file route have a go.
+                if span_len and got_len < span_len * 0.9:
+                    sys.stderr.write("  CLIP span came back %s of %s - fetching it whole\n"
+                                     % (_hms(got_len), _hms(span_len)))
+                    os.remove(got)
+                    continue
+                return got, {}, None, None, start, expect, "yt-dlp span", applied
+            return (got, {}, start or None, span_len or None, start, expect,
+                    "yt-dlp full", applied)
+
+    # Last resort: the live stream, which is what used to truncate.
+    return (src, headers, start or None, span_len or None, start, expect,
+            "stream", applied)
+
+
+def _clip_index_once(url, model, on_progress, refresh, window, dur_hint):
+    """One indexing attempt. Returns (vectors, seconds covered, expected, log)."""
+    np, _ort = _clip_deps()
+    sess = _clip_session(model, "vision_model.onnx")
+    mean = np.array(CLIP_MEAN, dtype=np.float32)
+    std = np.array(CLIP_STD, dtype=np.float32)
+
+    out = []
+    batch = []
+
+    def flush():
+        if not batch:
+            return
+        x = np.stack([np.frombuffer(b, dtype=np.uint8).reshape(224, 224, 3) for b in batch])
+        x = (x.astype(np.float32) / 255.0 - mean) / std
+        x = np.ascontiguousarray(np.transpose(x, (0, 3, 1, 2)))
+        vec = sess.run(None, {"pixel_values": x})[0].astype(np.float32)
+        vec /= (np.linalg.norm(vec, axis=1, keepdims=True) + 1e-8)
+        out.append(vec)
+        batch.clear()
+
+    def on_frame(buf):
+        batch.append(buf)
+        if len(batch) >= CLIP_BATCH:
+            flush()
+            on_progress(sum(len(v) for v in out))
+
+    tmpdir = tempfile.mkdtemp(prefix="msclip_")
+    try:
+        (src, headers, seek, take, offset, expect,
+         how, applied) = _clip_fetch(url, window, dur_hint, tmpdir, refresh)
+        # Where the file that was read begins inside the original video: a span
+        # download starts at the window, a whole one at zero.
+        kept = src if str(src).startswith(SPAN_DIR) else ""
+        kept_start = offset if how == "yt-dlp span" else 0.0
+        rc, err, seen = _clip_frames(src, headers, tmpdir, on_frame, seek, take)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    flush()
+    vecs = np.concatenate(out) if out else None
+    covered = (len(vecs) / CLIP_FPS) if vecs is not None else 0.0
+    # `expect` is what was asked for and is the honest bar; `seen` (how long the
+    # file ffmpeg opened turned out to be) only stands in when nothing else is
+    # known, because a truncated file reports its truncated self.
+    want = expect or seen
+    return vecs, covered, want, rc, err, offset, how, applied, kept, kept_start
+
+
+def clip_index_video(url, model, on_progress, dur_hint=0.0, window=None):
+    """Embed every sampled frame of `url` and store the result.
+
+    An index that stops early is worse than no index: the search then answers
+    confidently about the first thirty seconds of a fourteen minute video. So
+    the length actually read is checked against the video's own duration, and a
+    short read is retried against a freshly resolved stream (the usual cause is
+    a signed CDN URL dying mid-read) before anything is believed or cached.
+    """
+    np, _ort = _clip_deps()
+    best = None
+    offset = 0.0
+    for attempt in range(2):
+        (vecs, covered, expect, rc, err, offset, how, applied,
+         kept, kept_start) = _clip_index_once(
+            url, model, on_progress, attempt > 0, window, dur_hint)
+        window = applied            # file it under what was actually read
+        # `best[0] or []` would ask a numpy array whether it is truthy, which
+        # raises "the truth value of an array is ambiguous" — and it raised it
+        # on the second attempt only, so it hid until a stream read short.
+        kept = 0 if best is None or best[0] is None else len(best[0])
+        if best is None or (vecs is not None and len(vecs) > kept):
+            best = (vecs, covered, expect, err, offset)
+        if vecs is not None and (not expect or covered >= expect * 0.9):
+            break
+        sys.stderr.write("  CLIP short read %s via %s: %s of %s (rc=%s)%s\n"
+                         % (url[:50], how, _hms(covered), _hms(expect), rc,
+                            " - retrying" if attempt == 0 else ""))
+
+    vecs, covered, expect, err, offset = best
+    if vecs is None or not len(vecs):
+        tail = [l for l in err.strip().splitlines() if l.strip()][-1:] or ["no frames"]
+        raise RuntimeError("could not read the video: " + tail[0][:200])
+    if expect and covered < expect * 0.9:
+        raise RuntimeError(
+            "the stream stopped after %s of %s, so nothing past that point could "
+            "be searched. Try again, or Pack the tile so it is read from disk."
+            % (_hms(covered), _hms(expect)))
+
+    vecs = vecs.astype(np.float16)
+    try:
+        os.makedirs(CLIP_INDEX_DIR, exist_ok=True)
+        np.save(_clip_index_path(url, model, window), vecs)
+        with open(_clip_meta_path(url, model, window), "w", encoding="utf-8") as f:
+            json.dump({"count": int(len(vecs)), "expect": round(expect, 2),
+                       "offset": round(offset, 2), "fps": CLIP_FPS,
+                       "window": _window_tag(window), "file": kept,
+                       "file_start": round(kept_start, 2),
+                       "model": clip_model_id(model), "ts": int(time.time())}, f)
+    except (OSError, ValueError):
+        pass
+    return vecs
+
+
+def _set_clip_job(job_id, **fields):
+    with _clip_jobs_lock:
+        job = _clip_jobs.get(job_id)
+        if job:
+            job.update(fields)
+
+
+def _run_clip_job(job_id, url, model, dur_hint=0.0, window=None):
+    try:
+        with _clip_slots:
+            _set_clip_job(job_id, stage="indexing")
+
+            def progress(n):
+                _set_clip_job(job_id, at=n)
+
+            vecs = clip_index_video(url, model, progress, dur_hint, window)
+            _set_clip_job(job_id, stage="done", at=len(vecs), count=len(vecs))
+    except Exception as e:  # noqa: BLE001
+        _set_clip_job(job_id, stage="error",
+                      error=(str(e).splitlines() or ["indexing failed"])[-1][:250])
+
+
+# How many of the example's frames a second is allowed to be judged by. One
+# would let a single odd frame decide; the average of the best three is steady
+# without blurring different clips together.
+CLIP_LIKE_TOPK = 3
+
+
+def clip_like(vecs, ref, span=None):
+    """Per-second likeness to an example clip, in 0..1, plus a quality note.
+
+    Words are a poor way to ask for "this exact kind of moment" — you already
+    have one, in another tile. Each second is compared against **every frame**
+    of the example and keeps its best few matches; averaging the example into
+    one query vector instead (what this did first) blurs a compilation of
+    several different clips into a smear that resembles none of them. Measured
+    on real footage, the per-frame form picks seconds that are markedly more
+    alike, both to the example and to each other.
+
+    The scale is then set by the video itself — its own median second is 0 and
+    its best is 1 — because raw CLIP distance saturates on footage that shares
+    a performer and a room: everything sits between 0.85 and 0.96, and an
+    absolute threshold there means nothing. `gap` reports how much room there
+    was between the ordinary second and the best one, which is the honest
+    measure of whether the model could tell them apart at all.
+    """
+    np, _ort = _clip_deps()
+    ref = ref.astype(np.float32)
+    if span:
+        a = max(0, int(span[0]))
+        b = min(len(ref), int(span[1]) + 1)
+        if b - a >= 1:
+            ref = ref[a:b]
+
+    frames = vecs.astype(np.float32)
+    sim = frames @ ref.T
+    k = min(CLIP_LIKE_TOPK, sim.shape[1])
+    raw = np.sort(sim, axis=1)[:, -k:].mean(axis=1)
+
+    median = float(np.median(raw))
+    peak = float(np.percentile(raw, 99.5))
+    gap = peak - median
+    curve = np.clip((raw - median) / max(gap, 1e-6), 0.0, 1.0)
+    return ([round(float(v), 4) for v in curve],
+            {"gap": round(gap, 4), "peak": round(float(raw.max()), 4),
+             "median": round(median, 4)})
+
+
+def clip_classify(vecs, preset, model):
+    """Per-second odds that a second is this preset's scene type, in 0..1.
+
+    The positive phrasings are averaged into one prototype — several ways of
+    saying a thing land in slightly different places, and their mean is a
+    steadier target than any of them. Every second is then a softmax between
+    that prototype, the scenes known to be mistaken for it, and the ordinary
+    background. What comes back is the share the prototype won, which is a
+    probability rather than a distance, and so comparable between videos.
+    """
+    np, _ort = _clip_deps()
+    cfg = CLIP_PRESETS[preset]
+
+    pos = None
+    for phrase in cfg["positive"]:
+        v = clip_text_vector(phrase, model)
+        pos = v.copy() if pos is None else pos + v
+    pos /= (float(np.linalg.norm(pos)) + 1e-8)
+
+    against = [clip_text_vector(n, model) for n in cfg["negative"]]
+    against += [clip_text_vector(b, model) for b in CLIP_BACKGROUND]
+
+    frames = vecs.astype(np.float32)
+    logits = 100.0 * (frames @ np.stack([pos] + against).T)
+    logits -= logits.max(axis=1, keepdims=True)
+    exp = np.exp(logits)
+    probs = exp / (exp.sum(axis=1, keepdims=True) + 1e-9)
+    return [round(float(v), 4) for v in probs[:, 0]]
+
+
+def _smooth(curve, radius=2):
+    """Centred moving average, so one odd second cannot place a cut."""
+    n = len(curve)
+    pre = [0.0]
+    for v in curve:
+        pre.append(pre[-1] + v)
+    out = []
+    for i in range(n):
+        a, b = max(0, i - radius), min(n, i + radius + 1)
+        out.append((pre[b] - pre[a]) / (b - a))
+    return out
+
+
+def clip_pick_moment(curve, offset=0.0, duration=0.0, gate=0.35, prefer="last",
+                     min_len=8.0, max_len=96.0, margin=5.0):
+    """The one clip worth keeping from a scored video, or None.
+
+    This is the picking that was calibrated against six videos with known
+    answers, moved here so a compilation can be built without a browser:
+
+    * `prefer="last"` takes the last stretch still scoring near the top rather
+      than the single highest second — a scene that closes a video is the last
+      thing that looks like it, and something earlier often looks more like the
+      words than the real thing does (that one rule: 2/4 right -> 3/4).
+    * the clip then grows out to half of its own peak, which is where the scene
+      ends rather than where a fixed length happens to fall,
+    * and a margin keeps a little air on both sides.
+
+    Times come back on the video's own clock, `offset` being where the scored
+    stretch starts inside it.
+    """
+    if not curve:
+        return None
+    smooth = _smooth(curve)
+    n = len(smooth)
+    top = max(smooth)
+    if top <= 0:
+        return None
+
+    if prefer == "last":
+        bar = top * 0.5
+        end = max((i for i in range(n) if smooth[i] >= bar), default=-1)
+        if end < 0:
+            return None
+        start = end
+        while start > 0 and smooth[start - 1] >= bar:
+            start -= 1
+        seed = max(range(start, end + 1), key=lambda i: smooth[i])
+    else:
+        seed = max(range(n), key=lambda i: smooth[i])
+
+    peak = smooth[seed]
+    if peak < gate:
+        return None
+
+    floor = max(peak * 0.5, 0.05)
+    a = b = seed
+    while a > 0 and smooth[a - 1] >= floor and (b - a + 1) < max_len:
+        a -= 1
+    while b < n - 1 and smooth[b + 1] >= floor and (b - a + 1) < max_len:
+        b += 1
+
+    lo, hi = float(a), float(b + 1)
+    if hi - lo < min_len:                     # too short: centre a minimum clip
+        lo = max(0.0, lo - (min_len - (hi - lo)) / 2.0)
+        hi = min(float(n), lo + min_len)
+        lo = max(0.0, hi - min_len)
+
+    start = offset + lo - margin
+    end = offset + hi + margin
+    limit = duration or (offset + n)
+    start = max(0.0, start)
+    end = min(limit, end)
+    if end <= start + 0.5:
+        return None
+    return {"start": round(start, 2), "end": round(end, 2),
+            "score": round(float(peak), 4), "at": round(offset + seed, 2)}
+
+
+def clip_search(vecs, prompts, model):
+    """Per-second, per-prompt share of the match, in 0..1.
+
+    Softmax over [your phrases + CLIP_BACKGROUND] at CLIP's own logit scale of
+    100. A second where your words describe the picture better than any of the
+    ordinary alternatives lands near 1; a phrase that is simply not in the
+    video stays near zero everywhere, which is the answer we want to be able
+    to give.
+    """
+    np, _ort = _clip_deps()
+    frames = vecs.astype(np.float32)
+    mat = np.stack([clip_text_vector(p, model) for p in prompts]
+                   + [clip_text_vector(b, model) for b in CLIP_BACKGROUND])
+    logits = 100.0 * (frames @ mat.T)
+    logits -= logits.max(axis=1, keepdims=True)
+    exp = np.exp(logits)
+    probs = exp / (exp.sum(axis=1, keepdims=True) + 1e-9)
+    return {p: [round(float(v), 4) for v in probs[:, i]] for i, p in enumerate(prompts)}
+
+
+# ---------- /api/channel (a whole performer's page, in one go) ----------
+
+# The wall was never the point of a compilation — it was just where the URLs
+# happened to be. Fifty tiles playing at once is what makes a browser crawl,
+# and none of it is needed: given a model page, yt-dlp lists the videos, the
+# preset finds the moment in each, and ffmpeg joins them. No player involved.
+
+CHANNEL_MAX = 200
+CHANNEL_JOB_TTL = 7200
+
+_channel_jobs = {}
+_channel_jobs_lock = threading.Lock()
+
+
+def _set_channel(job_id, **fields):
+    with _channel_jobs_lock:
+        job = _channel_jobs.get(job_id)
+        if job:
+            job.update(fields)
+
+
+# A listing page carries its links in plain HTML; that is all this needs.
+_VIEWKEY_RE = re.compile(
+    r'href="(?:https?://[^"]*)?/view_video\.php\?viewkey=([A-Za-z0-9]+)"'
+    r'(?:[^>]*?\stitle="([^"]*)")?', re.I)
+
+
+def _channel_scrape(url, limit):
+    """The listing read straight off the page, for when the extractor is refused.
+
+    Sites answer a second kind of request with a JS challenge ("PhantomJS not
+    found") long before they stop serving HTML to something that looks like a
+    browser — and the project already has a fetcher that looks like one.
+    """
+    base = url.rstrip("/")
+    if "/model/" in base and not base.endswith("/videos"):
+        base += "/videos"
+
+    out, seen = [], set()
+    for page in range(1, 6):
+        target = base if page == 1 else "%s?page=%d" % (base, page)
+        try:
+            html, _imp = _fetch_page_html(target)
+        except Exception:  # noqa: BLE001
+            break
+        if not html:
+            break
+        fresh = 0
+        for key, title in _VIEWKEY_RE.findall(html):
+            if key in seen:
+                continue
+            seen.add(key)
+            fresh += 1
+            out.append({"url": "https://www.pornhub.com/view_video.php?viewkey=" + key,
+                        "title": (title or key).strip(), "duration": 0.0})
+            if len(out) >= limit:
+                return out
+        if not fresh:
+            break
+    return out
+
+
+def channel_videos(url, limit=CHANNEL_MAX):
+    """Every video on a performer/channel page, without opening any of them.
+
+    `extract_flat` stops at the listing, so this is one page fetch and a second
+    of work for sixty videos rather than sixty extractions. When the extractor
+    is turned away, the page's own HTML still has the links.
+    """
+    import yt_dlp
+
+    limit = max(1, min(int(limit or CHANNEL_MAX), CHANNEL_MAX))
+    opts = {
+        "quiet": True, "no_warnings": True, "noprogress": True,
+        "extract_flat": "in_playlist",
+        "playlistend": limit,
+        "logger": _YdlLogger(),
+    }
+    if _IMPERSONATE is not None:
+        opts["impersonate"] = _IMPERSONATE
+
+    title, out, seen = url, [], set()
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+        title = info.get("title") or info.get("id") or url
+        for entry in (info.get("entries") or []):
+            if not entry:
+                continue
+            link = entry.get("url") or entry.get("webpage_url") or ""
+            if not link or link in seen:
+                continue
+            seen.add(link)
+            out.append({"url": link,
+                        "title": entry.get("title") or link,
+                        "duration": float(entry.get("duration") or 0)})
+    except Exception as e:  # noqa: BLE001
+        sys.stderr.write("  CHANNEL extractor refused (%s) - reading the page instead\n"
+                         % str(e).splitlines()[-1][:110])
+
+    if not out:
+        out = _channel_scrape(url, limit)
+        if out:
+            sys.stderr.write("  CHANNEL read %d videos off the page itself\n" % len(out))
+    return {"title": title, "videos": out[:limit]}
+
+
+def _channel_cut_for(video, preset, model, on_progress):
+    """Index one video and return the clip the preset wants, or None."""
+    cfg = CLIP_PRESETS[preset]
+    window = tuple(cfg["window"])
+    vecs = clip_index_load(video["url"], model, window)
+    if vecs is None:
+        vecs = clip_index_video(video["url"], model, on_progress,
+                                video.get("duration") or 0.0, window)
+    meta = _clip_meta_read(video["url"], model, window) or {}
+    offset = float(meta.get("offset") or 0.0)
+    duration = float(video.get("duration") or 0.0) or (offset + len(vecs))
+
+    curve = clip_classify(vecs, preset, model)
+    moment = clip_pick_moment(curve, offset=offset, duration=duration,
+                              gate=cfg.get("gate", 0.35),
+                              prefer=cfg.get("prefer", "best"))
+    if not moment:
+        return None
+
+    # Prefer the file indexing already downloaded: cutting from disk asks the
+    # site nothing, which is both faster and the reason this stopped failing
+    # halfway through a long run.
+    source, start, end = video["url"], moment["start"], moment["end"]
+    local = meta.get("file") or ""
+    if local and os.path.isfile(local):
+        shift = float(meta.get("file_start") or 0.0)
+        source = local
+        start, end = max(0.0, moment["start"] - shift), moment["end"] - shift
+
+    return {"url": source, "page": video["url"], "title": video["title"],
+            "start": round(start, 2), "end": round(end, 2),
+            "score": moment["score"], "at": moment["at"], "local": bool(local)}
+
+
+def _run_channel_job(job_id, url, limit, preset, model, resolution):
+    """List, measure, pick, cut, join — the whole compilation, server side."""
+    try:
+        span_prune()
+        _set_channel(job_id, stage="listing")
+        listing = channel_videos(url, limit)
+        videos = listing["videos"]
+        if not videos:
+            _set_channel(job_id, stage="error", error="no videos found on that page")
+            return
+        _set_channel(job_id, stage="indexing", title=listing["title"],
+                     total=len(videos), done=0, found=0)
+
+        cuts, missed = [], []
+        for i, video in enumerate(videos):
+            _set_channel(job_id, done=i, current=video["title"][:80])
+
+            def progress(frames, i=i):
+                _set_channel(job_id, frames=frames)
+
+            try:
+                cut = _channel_cut_for(video, preset, model, progress)
+            except Exception as e:  # noqa: BLE001
+                missed.append("%s: %s" % (video["title"][:40],
+                                          str(e).splitlines()[-1][:90]))
+                continue
+            if cut:
+                cuts.append(cut)
+                with _channel_jobs_lock:
+                    job = _channel_jobs.get(job_id)
+                    if job:
+                        job["found"] = len(cuts)
+                        job["clips"] = [{"title": c["title"][:70], "start": c["start"],
+                                         "end": c["end"], "score": c["score"]}
+                                        for c in cuts]
+        _set_channel(job_id, done=len(videos), missed=missed[:10])
+
+        if not cuts:
+            _set_channel(job_id, stage="error",
+                         error="none of the %d videos had the moment "
+                               "(or none could be read)" % len(videos))
+            return
+
+        # Hand the collected clips to the compile machinery already in place.
+        sub_id = uuid.uuid4().hex
+        with _compile_jobs_lock:
+            _compile_jobs[sub_id] = {"stage": "queued", "done": 0, "total": len(cuts),
+                                     "error": None, "result": None, "skipped": 0,
+                                     "tmpdir": None, "ts": time.time()}
+        _set_channel(job_id, stage="cutting", compile_id=sub_id, total_cuts=len(cuts))
+
+        watcher = threading.Thread(
+            target=_run_compile_job,
+            args=(sub_id, [{"url": c["url"], "start": c["start"], "end": c["end"]}
+                           for c in cuts],
+                  COMPILE_RES.get(str(resolution), COMPILE_RES["720"]),
+                  int(resolution) if str(resolution).isdigit() else 720),
+            daemon=True)
+        watcher.start()
+        while watcher.is_alive():
+            with _compile_jobs_lock:
+                sub = dict(_compile_jobs.get(sub_id) or {})
+            _set_channel(job_id, cut_done=sub.get("done", 0),
+                         stage="joining" if sub.get("stage") == "concatenating" else "cutting")
+            time.sleep(0.5)
+
+        with _compile_jobs_lock:
+            sub = dict(_compile_jobs.get(sub_id) or {})
+        if sub.get("stage") != "done":
+            _set_channel(job_id, stage="error",
+                         error=sub.get("error") or "the clips could not be joined")
+            return
+        _set_channel(job_id, stage="done", result=sub.get("result"),
+                     skipped=sub.get("skipped", 0), compile_id=sub_id)
+    except Exception as e:  # noqa: BLE001
+        _set_channel(job_id, stage="error", error=str(e).splitlines()[-1][:250])
+
+
+# ---------- /api/tts (neural voices for Trance) ----------
+
+# The Web Speech API only offers what the machine has installed — on a fresh
+# Windows that is Zira and David, and Chrome shows no Microsoft Natural voice
+# at all. edge-tts talks to the same free endpoint Edge's Read Aloud uses, so
+# any browser gets ~160 neural female voices, with the gender declared by the
+# service instead of guessed from the first name.
+#
+# Optional: without edge-tts installed the endpoints answer 503 and the page
+# falls back to the browser's own voices.
+
+TTS_MAX_CHARS = 600
+TTS_CACHE_MAX = 240                 # phrases loop, so a small LRU covers a session
+TTS_CACHE_BYTES = 48 * 1024 * 1024
+TTS_VOICES_TTL = 3600
+
+_tts_voices = None
+_tts_voices_at = 0.0
+_tts_voices_lock = threading.Lock()
+_tts_cache = collections.OrderedDict()  # key -> mp3 bytes
+_tts_cache_bytes = 0
+_tts_cache_lock = threading.Lock()
+_tts_render_locks = {}                  # key -> lock (two tabs, same phrase)
+
+
+def _tts_label(short):
+    """"en-US-AvaMultilingualNeural" -> "Ava Multilingual"."""
+    stem = short.rsplit("-", 1)[-1]
+    stem = re.sub(r"Neural$", "", stem)
+    return re.sub(r"(?<=[a-z])(?=[A-Z])", " ", stem) or short
+
+
+def tts_voices():
+    """The whole neural roster, fetched once an hour. Raises ImportError."""
+    global _tts_voices, _tts_voices_at
+    with _tts_voices_lock:
+        if _tts_voices and time.time() - _tts_voices_at < TTS_VOICES_TTL:
+            return _tts_voices
+        import asyncio
+        import edge_tts
+        raw = asyncio.run(edge_tts.list_voices())
+        out = []
+        for v in raw:
+            short = v.get("ShortName") or ""
+            tag = v.get("VoiceTag") or {}
+            out.append({
+                "name": short,
+                "label": _tts_label(short),
+                "locale": v.get("Locale") or "",
+                "localeName": v.get("LocaleName") or "",
+                "gender": (v.get("Gender") or "").lower(),
+                "traits": list(tag.get("VoicePersonalities") or [])[:3],
+                "multilingual": "Multilingual" in short,
+            })
+        out.sort(key=lambda v: (v["localeName"], v["label"]))
+        _tts_voices = out
+        _tts_voices_at = time.time()
+        return out
+
+
+def tts_voices_for(lang, gender=""):
+    """Voices for a language: exact locale first, then the multilingual ones
+    (they speak anything), then the rest of the same language."""
+    voices = tts_voices()
+    if gender in ("female", "male"):
+        voices = [v for v in voices if v["gender"] == gender]
+    if not lang:
+        return voices
+    want = lang.replace("_", "-").lower()
+    base = want.split("-")[0]
+    exact = [v for v in voices if v["locale"].lower() == want]
+    taken = set(v["name"] for v in exact)
+    multi = [v for v in voices if v["multilingual"] and v["name"] not in taken]
+    taken |= set(v["name"] for v in multi)
+    same = [v for v in voices
+            if v["locale"].lower().split("-")[0] == base and v["name"] not in taken]
+    return exact + multi + same
+
+
+def _tts_cache_put(key, data):
+    global _tts_cache_bytes
+    with _tts_cache_lock:
+        _tts_cache[key] = data
+        _tts_cache_bytes += len(data)
+        while _tts_cache and (len(_tts_cache) > TTS_CACHE_MAX
+                              or _tts_cache_bytes > TTS_CACHE_BYTES):
+            _, old = _tts_cache.popitem(last=False)
+            _tts_cache_bytes -= len(old)
+
+
+def _tts_synth(text, voice, rate, pitch):
+    import asyncio
+    import edge_tts
+
+    async def run():
+        com = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
+        buf = bytearray()
+        async for chunk in com.stream():
+            if chunk.get("type") == "audio" and chunk.get("data"):
+                buf += chunk["data"]
+        return bytes(buf)
+
+    return asyncio.run(run())
+
+
+def tts_render(text, voice, rate, pitch):
+    """MP3 bytes for one phrase, memoised — the loop says the same lines all
+    evening, so nothing after the first pass touches the network."""
+    key = hashlib.sha1(
+        ("%s|%s|%s|%s" % (voice, rate, pitch, text)).encode("utf-8")).hexdigest()
+    with _tts_cache_lock:
+        hit = _tts_cache.get(key)
+        if hit is not None:
+            _tts_cache.move_to_end(key)
+            return hit
+        lock = _tts_render_locks.setdefault(key, threading.Lock())
+    with lock:
+        with _tts_cache_lock:
+            hit = _tts_cache.get(key)
+            if hit is not None:
+                _tts_cache.move_to_end(key)
+                return hit
+        data = _tts_synth(text, voice, rate, pitch)
+        if not data:
+            raise ResolveError("the voice service returned no audio")
+        _tts_cache_put(key, data)
+        with _tts_cache_lock:
+            _tts_render_locks.pop(key, None)
+        return data
+
+
+def _tts_pct(v):
+    """Rate/volume as the service wants it: "-25%", clamped and signed."""
+    m = re.match(r"^([+-]?\d{1,3})%?$", (v or "").strip())
+    n = int(m.group(1)) if m else 0
+    n = max(-90, min(200, n))
+    return "%+d%%" % n
+
+
+def _tts_hz(v):
+    m = re.match(r"^([+-]?\d{1,3})\s*Hz$", (v or "").strip(), re.I)
+    n = int(m.group(1)) if m else 0
+    n = max(-100, min(100, n))
+    return "%+dHz" % n
 
 
 # ---------- /api/related (one more tile like the ones already up) ----------
@@ -2043,10 +3867,24 @@ class Handler(BaseHTTPRequestHandler):
             return self.handle_diagnose(qs)
         if path == "/api/compile/status":
             return self.handle_compile_status(qs)
+        if path == "/api/analyze/status":
+            return self.handle_analyze_status(qs)
+        if path == "/api/analyze/result":
+            return self.handle_analyze_result(qs)
+        if path == "/api/clip/status":
+            return self.handle_clip_status(qs)
+        if path == "/api/clip/index/status":
+            return self.handle_clip_index_status(qs)
+        if path == "/api/channel/status":
+            return self.handle_channel_status(qs)
         if path == "/api/shrink/status":
             return self.handle_shrink_status(qs)
         if path == "/api/compile/result":
             return self.handle_compile_result(qs)
+        if path == "/api/voices":
+            return self.handle_voices(qs)
+        if path == "/api/tts":
+            return self.handle_tts(qs)
         if path.startswith("/api/localfile/"):
             return self.handle_localfile(path)
         return self.handle_static(path)
@@ -2056,6 +3894,20 @@ class Handler(BaseHTTPRequestHandler):
         qs = urllib.parse.parse_qs(parsed.query)
         if parsed.path == "/api/compile":
             return self.handle_compile()
+        if parsed.path == "/api/analyze":
+            return self.handle_analyze()
+        if parsed.path == "/api/clip/setup":
+            return self.handle_clip_setup()
+        if parsed.path == "/api/clip/index":
+            return self.handle_clip_index()
+        if parsed.path == "/api/clip/search":
+            return self.handle_clip_search()
+        if parsed.path == "/api/clip/similar":
+            return self.handle_clip_similar()
+        if parsed.path == "/api/channel/list":
+            return self.handle_channel_list()
+        if parsed.path == "/api/channel/compile":
+            return self.handle_channel_compile()
         if parsed.path == "/api/upload":
             return self.handle_upload(qs)
         if parsed.path == "/api/shrink":
@@ -2369,6 +4221,399 @@ class Handler(BaseHTTPRequestHandler):
             _compile_jobs.pop(job_id, None)
         if snap.get("tmpdir"):
             shutil.rmtree(snap["tmpdir"], ignore_errors=True)
+
+    # ---------- /api/analyze (where the interesting moments are) ----------
+
+    def handle_analyze(self):
+        """Start a measuring pass over one video and return its job id.
+
+        A curve already on disk comes straight back in this response, so the
+        common case — reopening the Moments panel — makes no job at all.
+        """
+        if not FFMPEG:
+            return self.send_json({"ok": False, "error":
+                "ffmpeg not found on the server. Install it with "
+                "'pip install imageio-ffmpeg' (or add ffmpeg to PATH) and restart."}, 500)
+
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        body = self.rfile.read(length) if length > 0 else b""
+        try:
+            data = json.loads(body.decode("utf-8"))
+        except Exception:  # noqa: BLE001
+            return self.send_json({"ok": False, "error": "invalid JSON body"}, 400)
+
+        url = (data.get("url") or "").strip()
+        if not url:
+            return self.send_json({"ok": False, "error": "no url"}, 400)
+        try:
+            qmax = int(data.get("quality") or 0)
+        except (TypeError, ValueError):
+            qmax = 0
+        try:
+            dur_hint = float(data.get("duration") or 0)
+        except (TypeError, ValueError):
+            dur_hint = 0.0
+
+        if not data.get("fresh"):
+            cached = _analyze_cache_get(url, qmax)
+            # Curves measured before the coverage check existed can describe the
+            # first six seconds of an eight minute video, and every consumer
+            # then treats that as the video's length. The browser knows better.
+            if cached and dur_hint and cached.get("duration", 0) < dur_hint * 0.9:
+                sys.stderr.write("  ANALYZE cached curve is %s but the player reports %s"
+                                 " - measuring again\n"
+                                 % (_hms(cached.get("duration", 0)), _hms(dur_hint)))
+                cached = None
+            if cached:
+                return self.send_json({"ok": True, "cached": True, "data": cached})
+        # A probe only asks whether the curve already exists: opening the panel
+        # on a big wall must not kick off forty decodes on its own.
+        if data.get("probe"):
+            return self.send_json({"ok": True, "cached": False})
+
+        job_id = uuid.uuid4().hex
+        now = time.time()
+        with _analyze_jobs_lock:
+            for jid in [k for k, v in _analyze_jobs.items()
+                        if now - v.get("ts", now) > ANALYZE_JOB_TTL]:
+                _analyze_jobs.pop(jid, None)
+            _analyze_jobs[job_id] = {
+                "stage": "queued", "at": 0.0, "dur": dur_hint,
+                "error": None, "data": None, "tmpdir": None, "ts": now,
+            }
+        threading.Thread(target=_run_analyze_job,
+                         args=(job_id, url, qmax, dur_hint), daemon=True).start()
+        return self.send_json({"ok": True, "job_id": job_id})
+
+    def handle_analyze_status(self, qs):
+        job_id = (qs.get("id") or [""])[0]
+        with _analyze_jobs_lock:
+            job = _analyze_jobs.get(job_id)
+            snap = dict(job) if job else None
+        if not snap:
+            return self.send_json({"ok": False, "error": "unknown or expired job"}, 404)
+        dur = snap.get("dur") or 0.0
+        return self.send_json({
+            "ok": True,
+            "stage": snap["stage"],
+            "at": round(snap.get("at") or 0.0, 1),
+            "dur": round(dur, 1),
+            "pct": round(min(1.0, (snap.get("at") or 0.0) / dur), 4) if dur else None,
+            "error": snap["error"],
+            "ready": snap["stage"] == "done",
+        })
+
+    def handle_analyze_result(self, qs):
+        job_id = (qs.get("id") or [""])[0]
+        with _analyze_jobs_lock:
+            job = _analyze_jobs.get(job_id)
+            snap = dict(job) if job else None
+        if not snap or snap["stage"] != "done" or not snap.get("data"):
+            return self.send_json({"ok": False, "error": "result not ready"}, 404)
+        # The curve is cached on disk; the job has nothing left to keep.
+        with _analyze_jobs_lock:
+            _analyze_jobs.pop(job_id, None)
+        return self.send_json({"ok": True, "data": snap["data"]})
+
+    # ---------- /api/clip (finding a moment by describing it) ----------
+
+    def _body_json(self):
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        raw = self.rfile.read(length) if length > 0 else b""
+        try:
+            return json.loads(raw.decode("utf-8"))
+        except Exception:  # noqa: BLE001
+            return None
+
+    @staticmethod
+    def _read_window(data, key="window"):
+        """[from, to] as fractions of the video, or None for the whole thing."""
+        w = data.get(key)
+        try:
+            a, b = float(w[0]), float(w[1])
+        except (TypeError, ValueError, IndexError):
+            return None
+        a, b = max(0.0, min(1.0, a)), max(0.0, min(1.0, b))
+        return None if b - a >= 0.999 or b <= a else (a, b)
+
+    def handle_clip_status(self, qs):
+        """What the text search can do right now: deps, models, provider."""
+        np, ort = _clip_deps()
+        model = clip_model_id((qs.get("model") or [CLIP_DEFAULT_MODEL])[0])
+        missing = _clip_missing(model) if np else list(clip_model(model)["files"])
+        models = []
+        for mid, cfg in CLIP_MODELS.items():
+            gone = _clip_missing(mid) if np else list(cfg["files"])
+            models.append({
+                "id": mid,
+                "label": cfg["label"],
+                "ready": not gone,
+                "bytes": sum(cfg["files"][n][1] for n in gone),
+                "total": sum(sz for _p, sz in cfg["files"].values()),
+            })
+        return self.send_json({
+            "ok": True,
+            "api": API_VERSION,
+            "deps": bool(np and ort),
+            "model": model,
+            "ready": bool(np and ort and not missing),
+            "missing": missing,
+            "bytes": sum(clip_model(model)["files"][n][1] for n in missing),
+            "models": models,
+            "presets": [{"id": k, "label": v["label"], "window": v["window"],
+                         "prefer": v.get("prefer", "best"), "gate": v.get("gate", 0.35),
+                         "model": v.get("model", "")}
+                        for k, v in CLIP_PRESETS.items()],
+            "provider": _clip_provider or "",
+            "gpu": bool(np and ort and
+                        ({"CUDAExecutionProvider", "DmlExecutionProvider"}
+                         & set(ort.get_available_providers()))),
+            "setup": dict(_clip_setup),
+        })
+
+    def handle_clip_setup(self):
+        """Download one model's files (once). Progress: /api/clip/status."""
+        np, ort = _clip_deps()
+        if not (np and ort):
+            return self.send_json({"ok": False, "error":
+                "text search needs numpy and onnxruntime: "
+                "pip install numpy onnxruntime  (or onnxruntime-directml to use the GPU)"}, 503)
+        data = self._body_json() or {}
+        model = clip_model_id(data.get("model") or CLIP_DEFAULT_MODEL)
+        if _clip_setup.get("stage") == "downloading":
+            return self.send_json({"ok": True, "stage": "downloading"})
+        if not _clip_missing(model):
+            return self.send_json({"ok": True, "stage": "done"})
+        threading.Thread(target=_clip_download, args=(model,), daemon=True).start()
+        return self.send_json({"ok": True, "stage": "downloading"})
+
+    def handle_clip_index(self):
+        """Embed one video's frames, or report that it is already embedded."""
+        if not FFMPEG:
+            return self.send_json({"ok": False, "error": "ffmpeg not found on the server"}, 500)
+        data = self._body_json()
+        if data is None:
+            return self.send_json({"ok": False, "error": "invalid JSON body"}, 400)
+        url = (data.get("url") or "").strip()
+        if not url:
+            return self.send_json({"ok": False, "error": "no url"}, 400)
+
+        model = clip_model_id(data.get("model") or CLIP_DEFAULT_MODEL)
+        window = self._read_window(data)
+        try:
+            dur_hint = float(data.get("duration") or 0)
+        except (TypeError, ValueError):
+            dur_hint = 0.0
+
+        if not data.get("fresh"):
+            have = clip_index_load(url, model, window)
+            # The browser knows how long the tile is. An index cached by an
+            # older session that covers a fraction of it is worse than none,
+            # and this is the last place able to notice.
+            want = dur_hint * (window[1] - window[0]) if (dur_hint and window) else dur_hint
+            if have is not None and want and len(have) / CLIP_FPS < want * 0.9:
+                sys.stderr.write("  CLIP cached index is %s but %s was expected"
+                                 " - reindexing\n"
+                                 % (_hms(len(have) / CLIP_FPS), _hms(want)))
+                have = None
+            if have is not None:
+                meta = _clip_meta_read(url, model, window) or {}
+                return self.send_json({"ok": True, "cached": True, "count": int(len(have)),
+                                       "offset": meta.get("offset", 0)})
+        if data.get("probe"):
+            return self.send_json({"ok": True, "cached": False})
+
+        np, ort = _clip_deps()
+        if not (np and ort):
+            return self.send_json({"ok": False, "error":
+                "text search needs numpy and onnxruntime installed"}, 503)
+        if _clip_missing(model):
+            return self.send_json({"ok": False, "error":
+                "the %s model is not downloaded yet" % clip_model(model)["label"]}, 409)
+
+        job_id = uuid.uuid4().hex
+        now = time.time()
+        with _clip_jobs_lock:
+            for jid in [k for k, v in _clip_jobs.items()
+                        if now - v.get("ts", now) > ANALYZE_JOB_TTL]:
+                _clip_jobs.pop(jid, None)
+            _clip_jobs[job_id] = {"stage": "queued", "at": 0, "count": 0,
+                                  "error": None, "ts": now}
+        threading.Thread(target=_run_clip_job,
+                         args=(job_id, url, model, dur_hint, window), daemon=True).start()
+        return self.send_json({"ok": True, "job_id": job_id})
+
+    def handle_clip_index_status(self, qs):
+        job_id = (qs.get("id") or [""])[0]
+        with _clip_jobs_lock:
+            job = _clip_jobs.get(job_id)
+            snap = dict(job) if job else None
+        if not snap:
+            return self.send_json({"ok": False, "error": "unknown or expired job"}, 404)
+        return self.send_json({
+            "ok": True,
+            "stage": snap["stage"],
+            "at": snap["at"],
+            "count": snap["count"],
+            "error": snap["error"],
+            "ready": snap["stage"] == "done",
+        })
+
+    def handle_clip_search(self):
+        """Score every second of an indexed video against a few phrases."""
+        data = self._body_json()
+        if data is None:
+            return self.send_json({"ok": False, "error": "invalid JSON body"}, 400)
+        url = (data.get("url") or "").strip()
+        preset = data.get("preset") if data.get("preset") in CLIP_PRESETS else None
+        prompts = [str(p).strip() for p in (data.get("prompts") or []) if str(p).strip()][:12]
+        if not url or not (prompts or preset):
+            return self.send_json({"ok": False,
+                                   "error": "need a url and a phrase or a preset"}, 400)
+
+        model = clip_model_id(data.get("model") or CLIP_DEFAULT_MODEL)
+        window = self._read_window(data)
+        vecs = clip_index_load(url, model, window)
+        if vecs is None:
+            return self.send_json({"ok": False, "error": "this video is not indexed yet"}, 409)
+        offset = (_clip_meta_read(url, model, window) or {}).get("offset", 0)
+        try:
+            if preset:
+                scores = {CLIP_PRESETS[preset]["label"]: clip_classify(vecs, preset, model)}
+            else:
+                scores = clip_search(vecs, prompts, model)
+        except Exception as e:  # noqa: BLE001
+            return self.send_json({"ok": False, "error": str(e)[:200]}, 500)
+        # Logged so a search that went wrong can be looked at afterwards: what
+        # was asked, over how much video, and how strong the best second was.
+        sys.stderr.write("  CLIP search [%s] %s of video: %s\n"
+                         % (model, _hms(len(vecs) / CLIP_FPS),
+                            ", ".join("%s=%.2f@%s" % (p, max(v), _hms(v.index(max(v))))
+                                      for p, v in scores.items())))
+        return self.send_json({"ok": True, "step": 1.0 / CLIP_FPS, "offset": offset,
+                               "count": int(len(vecs)), "scores": scores})
+
+    def handle_clip_similar(self):
+        """Score one video against an example clip from another tile."""
+        data = self._body_json()
+        if data is None:
+            return self.send_json({"ok": False, "error": "invalid JSON body"}, 400)
+        url = (data.get("url") or "").strip()
+        ref_url = (data.get("ref") or "").strip()
+        if not url or not ref_url:
+            return self.send_json({"ok": False, "error": "need a url and a ref"}, 400)
+
+        model = clip_model_id(data.get("model") or CLIP_DEFAULT_MODEL)
+        window = self._read_window(data)
+        vecs = clip_index_load(url, model, window)
+        # The example is judged whole: whatever window the wall is searching,
+        # the thing being looked for is all of the example tile.
+        ref = clip_index_load(ref_url, model, self._read_window(data, "refWindow"))
+        offset = (_clip_meta_read(url, model, window) or {}).get("offset", 0)
+        if vecs is None:
+            return self.send_json({"ok": False, "error": "this video is not indexed yet"}, 409)
+        if ref is None:
+            return self.send_json({"ok": False, "error":
+                                   "the example tile is not indexed yet"}, 409)
+        span = None
+        try:
+            if data.get("end"):
+                span = (int(data.get("start") or 0), int(data["end"]))
+        except (TypeError, ValueError):
+            span = None
+        try:
+            curve, quality = clip_like(vecs, ref, span)
+        except Exception as e:  # noqa: BLE001
+            return self.send_json({"ok": False, "error": str(e)[:200]}, 500)
+        best = curve.index(max(curve)) if curve else 0
+        sys.stderr.write("  CLIP like [%s] %s of video, best second %s, "
+                         "gap %.3f (median %.3f -> peak %.3f)\n"
+                         % (model, _hms(len(vecs) / CLIP_FPS), _hms(best),
+                            quality["gap"], quality["median"], quality["peak"]))
+        return self.send_json({"ok": True, "step": 1.0 / CLIP_FPS, "offset": offset,
+                               "count": int(len(vecs)), "curve": curve,
+                               "quality": quality})
+
+    # ---------- /api/channel (a performer's whole page) ----------
+
+    def handle_channel_list(self):
+        """The videos on a model/channel page, without opening any of them."""
+        data = self._body_json()
+        if data is None:
+            return self.send_json({"ok": False, "error": "invalid JSON body"}, 400)
+        url = (data.get("url") or "").strip()
+        if not url:
+            return self.send_json({"ok": False, "error": "no url"}, 400)
+        try:
+            listing = channel_videos(url, data.get("limit") or CHANNEL_MAX)
+        except Exception as e:  # noqa: BLE001
+            return self.send_json({"ok": False,
+                                   "error": str(e).splitlines()[-1][:250]}, 502)
+        return self.send_json({"ok": True, "title": listing["title"],
+                               "count": len(listing["videos"]),
+                               "videos": listing["videos"]})
+
+    def handle_channel_compile(self):
+        """Start the whole thing: list, measure, pick, cut, join."""
+        if not FFMPEG:
+            return self.send_json({"ok": False, "error": "ffmpeg not found on the server"}, 500)
+        data = self._body_json()
+        if data is None:
+            return self.send_json({"ok": False, "error": "invalid JSON body"}, 400)
+        url = (data.get("url") or "").strip()
+        if not url:
+            return self.send_json({"ok": False, "error": "no url"}, 400)
+
+        preset = data.get("preset") if data.get("preset") in CLIP_PRESETS else CLIP_DEFAULT_PRESET
+        model = clip_model_id(data.get("model") or CLIP_DEFAULT_MODEL)
+        np, ort = _clip_deps()
+        if not (np and ort):
+            return self.send_json({"ok": False, "error":
+                "this needs numpy and onnxruntime installed on the server"}, 503)
+        if _clip_missing(model):
+            return self.send_json({"ok": False, "error":
+                "the %s model is not downloaded yet" % clip_model(model)["label"]}, 409)
+
+        resolution = str(data.get("resolution") or "720")
+        try:
+            limit = int(data.get("limit") or CHANNEL_MAX)
+        except (TypeError, ValueError):
+            limit = CHANNEL_MAX
+
+        job_id = uuid.uuid4().hex
+        now = time.time()
+        with _channel_jobs_lock:
+            for jid in [k for k, v in _channel_jobs.items()
+                        if now - v.get("ts", now) > CHANNEL_JOB_TTL]:
+                _channel_jobs.pop(jid, None)
+            _channel_jobs[job_id] = {
+                "stage": "queued", "total": 0, "done": 0, "found": 0, "clips": [],
+                "current": "", "error": None, "missed": [], "ts": now,
+                "cut_done": 0, "total_cuts": 0, "compile_id": None, "title": "",
+            }
+        threading.Thread(target=_run_channel_job,
+                         args=(job_id, url, limit, preset, model, resolution),
+                         daemon=True).start()
+        return self.send_json({"ok": True, "job_id": job_id})
+
+    def handle_channel_status(self, qs):
+        job_id = (qs.get("id") or [""])[0]
+        with _channel_jobs_lock:
+            job = _channel_jobs.get(job_id)
+            snap = dict(job) if job else None
+        if not snap:
+            return self.send_json({"ok": False, "error": "unknown or expired job"}, 404)
+        snap.pop("ts", None)
+        snap["ok"] = True
+        snap["ready"] = snap["stage"] == "done"
+        snap.pop("result", None)          # a server path is no use to the browser
+        return self.send_json(snap)
 
     # ---------- /api/related (a tile like the ones already up) ----------
 
@@ -3234,6 +5479,49 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 out.append(proxy_for(stripped))
         return "\n".join(out)
+
+    # ---------- /api/voices, /api/tts ----------
+
+    def handle_voices(self, qs):
+        lang = (qs.get("lang") or [""])[0]
+        gender = (qs.get("gender") or [""])[0].lower()
+        try:
+            voices = tts_voices_for(lang, gender)
+        except ImportError:
+            return self.send_json({"ok": False, "reason": "missing",
+                                   "error": "Neural voices need edge-tts: "
+                                            "pip install edge-tts"}, 503)
+        except Exception as e:
+            return self.send_json({"ok": False, "reason": "offline",
+                                   "error": str(e)[:200]}, 502)
+        return self.send_json({"ok": True, "voices": voices})
+
+    def handle_tts(self, qs):
+        text = (qs.get("text") or [""])[0].strip()[:TTS_MAX_CHARS]
+        voice = (qs.get("voice") or [""])[0].strip()
+        rate = _tts_pct((qs.get("rate") or ["+0%"])[0])
+        pitch = _tts_hz((qs.get("pitch") or ["+0Hz"])[0])
+        if not text:
+            return self.send_json({"ok": False, "error": "no text"}, 400)
+        if not re.match(r"^[a-zA-Z]{2,3}(-[A-Za-z0-9]{2,20}){1,3}Neural$", voice):
+            return self.send_json({"ok": False, "error": "bad voice name"}, 400)
+        try:
+            data = tts_render(text, voice, rate, pitch)
+        except ImportError:
+            return self.send_json({"ok": False, "reason": "missing",
+                                   "error": "Neural voices need edge-tts: "
+                                            "pip install edge-tts"}, 503)
+        except Exception as e:
+            return self.send_json({"ok": False, "reason": "offline",
+                                   "error": str(e)[:200]}, 502)
+        self.send_response(200)
+        self.send_header("Content-Type", "audio/mpeg")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        # Same phrase, same voice, same bytes — let the browser keep it too.
+        self.send_header("Cache-Control", "public, max-age=86400")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     # ---------- helpers ----------
 

@@ -179,11 +179,28 @@
     text-shadow: 0 1px 2px #000;
   }
   .cell-bar .btns { display: flex; gap: 4px; pointer-events: auto; }
-  .cell-bar button {
+  .cell-bar button,
+  .cell-bar a.src {
     padding: 4px 8px;
     font-size: 12px;
     border-radius: 6px;
     background: rgba(20,24,32,.85);
+  }
+  /* Link back to the page this tile was added from. An <a> and not a button so
+     the usual gestures work: middle-click, ctrl-click, "copy link address". */
+  .cell-bar a.src {
+    display: inline-flex;
+    align-items: center;
+    color: var(--text);
+    border: 1px solid var(--border);
+    text-decoration: none;
+    line-height: 1;
+    transition: background .15s, border-color .15s, color .15s;
+  }
+  .cell-bar a.src:hover {
+    background: #2a3140;
+    border-color: var(--accent);
+    color: var(--accent-hover);
   }
   .cell-bar button.close:hover { background: var(--danger); border-color: var(--danger); }
   .cell-bar select.qsel {
@@ -216,10 +233,14 @@
     background: rgba(16,19,26,.72);
     border: 1px solid var(--border);
     cursor: pointer;
-    opacity: .5;
+    /* Hidden until the pointer is over the tile — a wall of 40 videos should
+       not carry 40 red pills. A take in progress stays visible regardless. */
+    opacity: 0;
+    pointer-events: none;
     transition: opacity .15s, background .15s, border-color .15s;
   }
-  .cell:hover .rec-btn { opacity: 1; }
+  .cell:hover .rec-btn,
+  .rec-btn.recording { opacity: 1; pointer-events: auto; }
   .rec-btn::before {
     content: "";
     width: 9px; height: 9px;
@@ -578,6 +599,116 @@
   }
   .total-badge { font-size: 12px; color: var(--muted); }
   .total-badge b { color: var(--text); }
+
+  /* Moments modal */
+  .moments-opts { margin-bottom: 2px; }
+  .mom-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    overflow-y: auto;
+    max-height: 46vh;
+    padding-right: 2px;
+  }
+  .mom-list:empty::after {
+    content: "No tiles to measure — add a video first.";
+    color: var(--muted); font-size: 13px; padding: 10px; text-align: center;
+    border: 1px dashed var(--border); border-radius: 8px;
+  }
+  .mom-row {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 9px 10px;
+  }
+  .mom-head {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 7px;
+  }
+  .mom-head .mom-title {
+    flex: 1; min-width: 0; font-size: 13px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .mom-head .mom-state {
+    font-size: 11px; color: var(--muted); flex: none;
+    font-variant-numeric: tabular-nums;
+  }
+  .mom-head .mom-state.err { color: var(--danger); }
+  .mom-head button { padding: 3px 8px; font-size: 12px; border-radius: 6px; line-height: 1.3; }
+  .mom-canvas {
+    display: block; width: 100%; height: 54px;
+    border: 1px solid var(--border); border-radius: 8px;
+    background: var(--bg); cursor: crosshair;
+  }
+  .mom-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
+  .mom-chips:empty { display: none; }
+  .mom-chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 999px; padding: 3px 9px;
+    font-size: 11px; color: var(--muted);
+    font-variant-numeric: tabular-nums; cursor: pointer;
+    user-select: none;
+  }
+  .mom-chip:hover { border-color: var(--accent); }
+  .mom-chip.on { color: var(--text); border-color: var(--accent); background: rgba(79,140,255,.14); }
+  .mom-chip .why { opacity: .7; }
+  .mom-chip .seek { opacity: .6; }
+  .mom-chip .seek:hover { opacity: 1; }
+  .mom-hint { font-size: 11px; color: var(--muted); }
+  .mom-search { display: flex; gap: 8px; align-items: stretch; flex-wrap: wrap; }
+  /* The modal's own `input[type=text] { flex:none; width:100% }` is more
+     specific than a bare `.mom-search input`, and it used to hand the whole row
+     to the text box and push the select and the button off the panel. */
+  .modal .mom-search input[type="text"] {
+    flex: 1 1 220px; width: auto; min-width: 0;
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 9px 11px; font-size: 13px; outline: none;
+  }
+  .mom-search input:focus { border-color: var(--accent); }
+  .mom-search button { white-space: nowrap; flex: none; }
+  .mom-search select {
+    flex: 0 1 auto; min-width: 0; max-width: 210px;
+    text-overflow: ellipsis;
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 0 8px; font-size: 12px; cursor: pointer; outline: none;
+  }
+  .mom-search select:focus { border-color: var(--accent); }
+  .mom-cliprow { min-height: 14px; margin: -4px 0 -2px; }
+  .mom-chip .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--dot, #4f8cff); flex: none;
+  }
+  /* Channel compilation */
+  .ch-row { display: flex; gap: 8px; align-items: stretch; flex-wrap: wrap; }
+  .modal .ch-row input[type="text"] {
+    flex: 1 1 260px; width: auto; min-width: 0;
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 9px 11px; font-size: 13px; outline: none;
+  }
+  .modal .ch-row input[type="text"]:focus { border-color: var(--accent); }
+  .ch-row select {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 0 8px; font-size: 12px; cursor: pointer; outline: none;
+  }
+  .ch-note { font-size: 12px; color: var(--muted); line-height: 1.5; }
+  .ch-note b { color: var(--text); }
+  .ch-clips {
+    list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column;
+    gap: 4px; max-height: 30vh; overflow-y: auto;
+  }
+  .ch-clips li {
+    display: flex; gap: 8px; align-items: baseline;
+    background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 8px; padding: 5px 9px; font-size: 12px;
+  }
+  .ch-clips .when { color: var(--muted); font-variant-numeric: tabular-nums; flex: none; }
+  .ch-clips .what { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ch-clips .score { color: var(--accent); flex: none; }
+  .mom-group { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); }
+  .mom-group input { accent-color: var(--accent); }
 </style>
 </head>
 <body>
@@ -633,6 +764,8 @@
       <button id="mergeBtn" title="Merge several saved .json files into a single one">🧬 Merge</button>
       <input type="file" id="mergeFileInput" accept=".json,application/json" multiple hidden>
       <span class="sep"></span>
+      <button id="channelBtn" title="Give a performer or channel page and get one compilation out of every video on it — no tiles, no player, all on the server">📺 Channel</button>
+      <button id="momentsBtn" title="Find the interesting moments in every tile automatically (scene cuts, motion and loudness — measured locally by ffmpeg) and turn them into a compilation">🎯 Moments</button>
       <button id="compileBtn" title="Cut clips from your videos and export one compilation .mp4">🎬 Compile</button>
       <button id="clearBtn" title="Remove all players">🗑 Clear</button>
     </div>
@@ -752,6 +885,13 @@
             <option value="pink">Pink noise</option>
             <option value="brown">Brown noise</option>
             <option value="off">None</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Voice engine</span>
+          <select id="tranceEngine">
+            <option value="neural">Neural (server)</option>
+            <option value="browser">Browser (offline)</option>
           </select>
         </label>
         <label class="field">
@@ -893,6 +1033,174 @@
     </div>
   </div>
 
+  <!-- Modal: channel compilation -->
+  <div class="modal-backdrop" id="channelModal">
+    <div class="modal wide">
+      <h3>📺 Compilation from a whole page</h3>
+      <div class="modal-sub">
+        Paste a performer or channel page. Every video on it is measured on this
+        machine, the chosen scene type is found in each, and the clips come back as
+        one .mp4. No tiles, no player — fifty videos playing at once is what makes a
+        browser crawl, and none of it is needed for this.
+      </div>
+
+      <div class="ch-row">
+        <input type="text" id="chUrl" autocomplete="off"
+               placeholder="https://www.pornhub.com/model/…  ·  or any channel / playlist page">
+        <select id="chLimit" title="How many videos from the page to go through.">
+          <option value="10">first 10</option>
+          <option value="25" selected>first 25</option>
+          <option value="50">first 50</option>
+          <option value="200">everything</option>
+        </select>
+        <button type="button" id="chList">Check</button>
+      </div>
+
+      <div class="ch-row">
+        <select id="chPreset" title="Which scene type to look for."></select>
+        <select id="chRes" title="Resolution of the exported .mp4.">
+          <option value="480" selected>480p</option>
+          <option value="720">720p</option>
+          <option value="1080">1080p</option>
+        </select>
+        <span class="ch-note" id="chNote"></span>
+      </div>
+
+      <div class="compile-progress" id="chProgress">
+        <div class="progress-track"><div class="progress-fill" id="chFill"></div></div>
+        <div id="chStatus">Starting…</div>
+      </div>
+
+      <ul class="ch-clips" id="chClips"></ul>
+
+      <div class="modal-actions">
+        <button type="button" id="chClose">Close</button>
+        <button type="button" id="chGo" class="primary">⚡ Build the compilation</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: moments -->
+  <div class="modal-backdrop" id="momentsModal">
+    <div class="modal wide">
+      <h3>🎯 Find moments</h3>
+      <div class="modal-sub">
+        Measures each tile on this machine with ffmpeg — scene cuts, motion and
+        loudness — and marks the peaks. Or say what you are after in words and
+        <b>CLIP</b> finds it, also here, also free. Tick what you want, then send it to 🎬 Compile.
+        Nothing is uploaded anywhere.
+      </div>
+
+      <div class="cut-builder moments-opts">
+        <div class="field">
+          <label for="momClip">Clip length</label>
+          <select id="momClip">
+            <option value="4">4 s</option>
+            <option value="6">6 s</option>
+            <option value="8" selected>8 s</option>
+            <option value="12">12 s</option>
+            <option value="20">20 s</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="momMax" id="momMaxLabel">Per video</label>
+          <select id="momMax">
+            <option value="1" selected>1 · the best one</option>
+            <option value="2">2 moments</option>
+            <option value="3">3 moments</option>
+            <option value="5">5 moments</option>
+            <option value="8">8 moments</option>
+            <option value="12">12 moments</option>
+            <option value="20">20 moments</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="momFocus">Look for</label>
+          <select id="momFocus" title="What makes a moment interesting: sound peaks, picture movement, or both.">
+            <option value="1">Loud audio</option>
+            <option value="0.6" selected>Balanced</option>
+            <option value="0">Movement</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="momWhere">Where</label>
+          <select id="momWhere" title="Which part of each video to index and search. The moment you are after is usually near the end, and looking only there is both more accurate and much faster — only that stretch is downloaded.">
+            <option value="0,1">Whole video</option>
+            <option value="0.5,1">Last half</option>
+            <option value="0.6,1" selected>Last 40%</option>
+            <option value="0.75,1">Last quarter</option>
+            <option value="0,0.5">First half</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="momPad">Margin</label>
+          <select id="momPad" title="Seconds kept before and after the moment, so a clip does not start exactly on the action.">
+            <option value="0">none</option>
+            <option value="3">±3 s</option>
+            <option value="5" selected>±5 s</option>
+            <option value="10">±10 s</option>
+            <option value="20">±20 s</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="momSure">Confidence</label>
+          <select id="momSure" title="How sure CLIP has to be before a second is worth cutting. The score is the share of the match against the phrases that describe the scene, the ones that get mistaken for it, and the ordinary background — so it is a real threshold, not a ranking.">
+            <option value="0.15">15% · loose</option>
+            <option value="0.25">25% · loose</option>
+            <option value="0.35" selected>35% · preset default</option>
+            <option value="0.5">50% · strict</option>
+            <option value="0.7">70% · only sure things</option>
+          </select>
+        </div>
+        <div class="field grow">
+          <label>&nbsp;</label>
+          <button type="button" id="momAnalyze" class="primary">🔎 Analyze all tiles</button>
+        </div>
+      </div>
+
+      <div class="mom-search">
+        <select id="momPreset" title="A scene type that has been tuned here — a bank of ways to describe it AND a bank of the scenes that get mistaken for it, which is what draws the line. Pick “Custom” to search with your own words instead.">
+          <option value="cumshot" selected>🎯 Cumshot compilation</option>
+          <option value="">Custom · my own words</option>
+        </select>
+        <select id="momExample" title="Optional, and only used with Custom: point at a tile that already shows the kind of moment you want, and its frames become the query.">
+          <option value="">Example: none · use words</option>
+        </select>
+        <input type="text" id="momPrompts" autocomplete="off"
+               placeholder="Describe the moments: kiss, explosion, close-up of a face, someone dancing…  (English works best)">
+        <select id="momModel" title="Which CLIP to use. B/32 cuts the frame into 32-pixel patches and is the quickest; B/16 quarters the patch and sees smaller things; L/14 is the accurate one and several times slower. Each is downloaded once, on first use.">
+          <option value="b32" selected>B/32 · fast</option>
+          <option value="b16">B/16 · sharper</option>
+          <option value="l14">L/14 · best</option>
+        </select>
+        <button type="button" id="momSearch" class="primary" title="Index each tile with CLIP (running here, on your machine) and mark the seconds that look like these phrases">🧠 Search</button>
+      </div>
+      <div class="mom-cliprow"><span class="mom-hint" id="momClipState"></span></div>
+
+      <div class="mom-list" id="momList"></div>
+
+      <div class="compile-foot">
+        <span class="total-badge" id="momTotal">0 moments · 0.0 s</span>
+        <div class="opts">
+          <label class="mom-group" title="Let a searched clip run as long as the match lasts, instead of cutting it to the clip length above">
+            <input type="checkbox" id="momFit" checked>
+            <span>Fit to the match</span>
+          </label>
+          <label class="mom-group" title="Put every clip of the same phrase together in the compilation, instead of ordering by time">
+            <input type="checkbox" id="momGroup" checked>
+            <span>Group by phrase</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="modal-actions">
+        <button type="button" id="momClose">Close</button>
+        <button type="button" id="momAuto" title="Do the whole thing: measure or search every tile, keep what passes the confidence bar, and export the .mp4 — no ticking">⚡ Auto-edit</button>
+        <button type="button" id="momSend" class="primary">＋ Send to 🎬 Compile</button>
+      </div>
+    </div>
+  </div>
+
 <script>
 (function () {
   "use strict";
@@ -959,6 +1267,7 @@
   const tranceBeat = document.getElementById("tranceBeat");
   const tranceTone = document.getElementById("tranceTone");
   const tranceNoise = document.getElementById("tranceNoise");
+  const tranceEngine = document.getElementById("tranceEngine");
   const tranceLang = document.getElementById("tranceLang");
   const tranceGender = document.getElementById("tranceGender");
   const tranceVoice = document.getElementById("tranceVoice");
@@ -1142,6 +1451,10 @@
       // Origin of a blob: pasted alongside this link — the embedded player's
       // host, which tells the server's scan which <iframe> holds the video.
       _frameOrigin: frameOrigin || "",
+      // Page this tile came from when the raw address isn't one: a scanned
+      // page that yielded several videos, or a stream the extension sniffed.
+      // Feeds the ↗ button; `raw` is the fallback.
+      _page: (presetSrc && presetSrc.page) || "",
     };
 
     const bar = document.createElement("div");
@@ -1156,10 +1469,19 @@
         ).join("") +
         '</select>';
     }
+    // ↗ opens the address this video came from. Only when there is a public
+    // one to open: a local file lives on our own server, so it gets no button.
+    const link = sourceLinkOf(rec);
+    const linkHtml = link
+      ? '<a class="src" href="' + escapeHtml(link) + '" target="_blank"' +
+        ' rel="noopener noreferrer" title="Open the original page: ' +
+        escapeHtml(link) + '">↗</a>'
+      : "";
     bar.innerHTML =
       '<span class="title">' + escapeHtml(src.title || src.url) + '</span>' +
       '<span class="btns">' +
         qselHtml +
+        linkHtml +
         '<button class="reload" title="Reload this video">↻</button>' +
         '<button class="fs" title="Fullscreen">⛶</button>' +
         '<button class="close" title="Close">✕</button>' +
@@ -1853,6 +2175,7 @@
             type: v.isHls ? "hls" : "file",
             url: v.url,
             title: v.title || v.src,
+            page: src.url,
           }));
           toast("Found " + data.videos.length + " videos on the page — one tile each.", 4200);
           return;
@@ -2152,6 +2475,18 @@
     if (!/^https?:\/\//i.test(raw)) return "";
     if (raw.toLowerCase().startsWith(location.origin.toLowerCase())) return "";
     if (/\.(mp4|webm|m3u8|mov|mkv|m4v|ogv|ts|mpd)(\?|$)/i.test(raw)) return "";
+    return raw;
+  }
+
+  // Where the ↗ button on a tile points: the page we know it came from, else
+  // the address the user pasted. "" when there is nowhere public to send them
+  // (a local file, uploaded to our own server).
+  function sourceLinkOf(p) {
+    const page = ((p && p._page) || "").trim();
+    if (/^https?:\/\//i.test(page)) return page;
+    const raw = ((p && p.raw) || "").trim();
+    if (!/^https?:\/\//i.test(raw)) return "";
+    if (raw.toLowerCase().startsWith(location.origin.toLowerCase())) return "";
     return raw;
   }
 
@@ -3542,7 +3877,9 @@
     duck: 0.75,      // how far the videos drop while a phrase is spoken
     lang: "en-US",   // BCP 47 tag the utterances are tagged with
     gender: "female",// which half of the roster the voice list is narrowed to
+    engine: "neural",// "neural" = server voices, "browser" = Web Speech
     voice: "",       // preferred SpeechSynthesis voice name, "" = auto
+    voiceNeural: "", // preferred server voice ShortName, "" = auto
   };
 
   // Default phrase for the ▶ Test button, per language.
@@ -3791,9 +4128,271 @@
     return filteredVoices()[0] || null;
   }
 
+  /* --- Neural voices (server) --- */
+
+  // The Web Speech roster is whatever the machine has installed: two voices on
+  // a fresh Windows, and Chrome exposes none of the Microsoft Natural ones. The
+  // server's /api/tts (edge-tts) speaks to the same free endpoint Edge's Read
+  // Aloud uses — ~160 neural female voices in any browser, with the gender
+  // declared by the service instead of guessed from the first name. Without
+  // edge-tts on the server this falls straight back to the browser voices.
+
+  const TRANCE_PITCH_HZ = "-10Hz";   // matches the browser engine's pitch 0.9
+  const TTS_BLOB_MAX = 80;
+
+  let neuralState = "idle";          // idle | ok | missing | offline
+  let neuralError = "";
+  let neuralVoices = [];             // roster for the current language
+  let neuralWarned = false;
+  let langsFilled = false;
+  const neuralCache = new Map();     // "lang|gender" -> voices
+  const ttsBlobs = new Map();        // request url -> object URL
+  let ttsAudio = null;
+  let speakToken = 0;                // bumped on stop, so a render that lands
+                                     // after Stop does not start speaking
+
+  function neuralOn() { return trance.engine === "neural" && neuralState === "ok"; }
+
+  function fetchNeuralVoices(lang, gender) {
+    const key = (lang || "") + "|" + (gender || "");
+    if (neuralCache.has(key)) { neuralState = "ok"; return Promise.resolve(neuralCache.get(key)); }
+    const url = "/api/voices?lang=" + encodeURIComponent(lang || "") +
+                "&gender=" + encodeURIComponent(gender || "");
+    return fetch(url)
+      .then(r => r.json().catch(() => ({})).then(j => ({ status: r.status, j: j })))
+      .then(res => {
+        const j = res.j || {};
+        if (!j.ok) {
+          neuralState = j.reason === "missing" ? "missing" : "offline";
+          neuralError = j.error || ("HTTP " + res.status);
+          return [];
+        }
+        neuralState = "ok";
+        neuralError = "";
+        neuralCache.set(key, j.voices || []);
+        return j.voices || [];
+      })
+      .catch(err => {
+        neuralState = "offline";
+        neuralError = (err && err.message) || String(err);
+        return [];
+      });
+  }
+
+  function neuralFiltered() {
+    if (trance.gender === "any") return neuralVoices;
+    const hit = neuralVoices.filter(v => v.gender === trance.gender);
+    return hit.length ? hit : neuralVoices;
+  }
+
+  function pickNeuralVoice() {
+    const list = neuralFiltered();
+    if (trance.voiceNeural) {
+      const exact = neuralVoices.find(v => v.name === trance.voiceNeural);
+      if (exact) return exact;
+    }
+    return list[0] || null;
+  }
+
+  function neuralOptionText(v) {
+    const mark = v.gender === "female" ? " \u2640" : v.gender === "male" ? " \u2642" : "";
+    return v.label + mark + " \u00b7 " + v.locale +
+      (v.traits && v.traits.length ? " \u00b7 " + v.traits.join(", ").toLowerCase() : "");
+  }
+
+  // Every locale the service has, appended to the three built-in languages —
+  // otherwise 140 of the 160 female voices would be unreachable from the form.
+  function fillNeuralLangs() {
+    if (langsFilled) return;
+    fetchNeuralVoices("", "").then(list => {
+      if (!list.length || langsFilled) return;
+      langsFilled = true;
+      const temp = tranceLang.querySelector("option[data-temp]");
+      const have = new Set();
+      Array.from(tranceLang.options).forEach(o => { if (o !== temp) have.add(o.value); });
+      const locales = new Map();
+      list.forEach(v => { if (!have.has(v.locale)) locales.set(v.locale, v.localeName || v.locale); });
+      if (!locales.size) return;
+      const group = document.createElement("optgroup");
+      group.label = "More languages (neural)";
+      Array.from(locales.entries())
+        .sort((a, b) => a[1].localeCompare(b[1]))
+        .forEach(pair => {
+          const o = document.createElement("option");
+          o.value = pair[0];
+          o.textContent = pair[1];
+          group.appendChild(o);
+        });
+      tranceLang.appendChild(group);
+      if (temp) temp.remove();
+      tranceLang.value = trance.lang;
+    });
+  }
+
+  function refreshNeuralVoices() {
+    tranceVoiceHint.textContent = "Loading neural voices\u2026";
+    fillNeuralLangs();
+    fetchNeuralVoices(trance.lang, "").then(list => {
+      if (trance.engine !== "neural") return;
+      if (neuralState !== "ok") { neuralFallback(); return; }
+      neuralVoices = list;
+      const shown = neuralFiltered();
+      const resolved = pickNeuralVoice();
+
+      tranceVoice.innerHTML = "";
+      const auto = document.createElement("option");
+      auto.value = "";
+      auto.textContent = resolved
+        ? "Auto \u2014 " + neuralOptionText(resolved)
+        : "Auto (no voice for this language)";
+      tranceVoice.appendChild(auto);
+      shown.forEach(v => {
+        const o = document.createElement("option");
+        o.value = v.name;
+        o.textContent = neuralOptionText(v);
+        tranceVoice.appendChild(o);
+      });
+      tranceVoice.value = trance.voiceNeural || "";
+      if (tranceVoice.value !== (trance.voiceNeural || "")) {
+        tranceVoice.value = ""; trance.voiceNeural = "";
+      }
+
+      const females = list.filter(v => v.gender === "female").length;
+      tranceVoiceHint.textContent = shown.length + " neural voices for " +
+        trance.lang + " (" + females + " female) \u2014 free, rendered by the " +
+        "server and kept after the first time each phrase is spoken. The " +
+        "Multilingual ones read any language.";
+    });
+  }
+
+  // One place decides which roster fills the box: the server's or the browser's.
+  function refreshVoices() {
+    if (trance.engine === "neural") { refreshNeuralVoices(); return; }
+    refreshBrowserVoices();
+  }
+
+  // Neural asked for but unavailable: say why once, then behave like the
+  // offline engine instead of failing silently mid-session.
+  function neuralFallback() {
+    trance.engine = "browser";
+    tranceEngine.value = "browser";
+    refreshBrowserVoices();
+    tranceVoiceHint.textContent = neuralState === "missing"
+      ? "Neural voices need edge-tts on the server \u2014 run \"pip install edge-tts\" " +
+        "and reopen this panel. Using the browser's own voices for now."
+      : "The neural voice service is unreachable (" + neuralError + "). " +
+        "Using the browser's own voices.";
+  }
+
+  /* --- Neural playback --- */
+
+  function ttsUrl(text) {
+    const v = pickNeuralVoice();
+    if (!v) return "";
+    const pct = Math.round((trance.rate - 1) * 100);
+    return "/api/tts?voice=" + encodeURIComponent(v.name) +
+      "&rate=" + encodeURIComponent((pct >= 0 ? "+" : "") + pct + "%") +
+      "&pitch=" + encodeURIComponent(TRANCE_PITCH_HZ) +
+      "&text=" + encodeURIComponent(text);
+  }
+
+  // Phrases are held as blobs rather than left to the HTTP cache: the loop
+  // repeats the same lines all evening, and a phrase has to land on the beat,
+  // not one round trip after it.
+  function ttsGet(text) {
+    const url = ttsUrl(text);
+    if (!url) return Promise.reject(new Error("no voice for " + trance.lang));
+    const have = ttsBlobs.get(url);
+    if (have) return Promise.resolve(have);
+    return fetch(url).then(r => {
+      if (!r.ok) {
+        return r.json().catch(() => ({})).then(j => {
+          if (j && j.reason) neuralState = j.reason === "missing" ? "missing" : "offline";
+          throw new Error((j && j.error) || ("HTTP " + r.status));
+        });
+      }
+      return r.blob();
+    }).then(b => {
+      const obj = URL.createObjectURL(b);
+      ttsBlobs.set(url, obj);
+      while (ttsBlobs.size > TTS_BLOB_MAX) {
+        const oldest = ttsBlobs.keys().next().value;
+        URL.revokeObjectURL(ttsBlobs.get(oldest));
+        ttsBlobs.delete(oldest);
+      }
+      return obj;
+    });
+  }
+
+  // Renders the whole list up front, one at a time, so the first pass through
+  // the phrases is as prompt as the tenth — and so a wall of 40 tiles never
+  // waits on a voice render.
+  function warmPhrases() {
+    if (!neuralOn()) return;
+    let chain = Promise.resolve();
+    trance.phrases.slice(0, 40).forEach(t => {
+      chain = chain.then(() => (tranceOn ? ttsGet(t).catch(() => {}) : null));
+    });
+  }
+
+  function speakNeural(text, onDone) {
+    const token = speakToken;
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(speakWatchdog);
+      onDone();
+    };
+    const est = (text.length / 9) / Math.max(0.4, trance.rate) + 6;
+    const fallback = (why) => {
+      if (done) return;
+      done = true;
+      clearTimeout(speakWatchdog);
+      if (!neuralWarned) {
+        neuralWarned = true;
+        toast("Neural voice unavailable (" + why + ") \u2014 using the browser voice.", 5000);
+      }
+      speakBrowser(text, onDone);
+    };
+    ttsGet(text).then(src => {
+      if (done) return;
+      if (token !== speakToken) { finish(); return; }
+      const a = ttsAudio || (ttsAudio = new Audio());
+      a.onended = finish;
+      a.onerror = () => fallback("playback");
+      // The real length is known once the header is in; until then the same
+      // estimate the browser engine uses keeps the ducking from sticking.
+      a.onloadedmetadata = () => {
+        clearTimeout(speakWatchdog);
+        speakWatchdog = setTimeout(finish, ((a.duration || est) + 4) * 1000);
+      };
+      a.src = src;
+      a.volume = Math.min(1, Math.max(0, trance.voiceVolume));
+      speakWatchdog = setTimeout(finish, est * 1000);
+      const p = a.play();
+      if (p && p.catch) {
+        p.catch(err => fallback(err && err.name === "NotAllowedError"
+          ? "autoplay blocked" : "playback"));
+      }
+    }).catch(err => fallback((err && err.message) || "server"));
+  }
+
+  function stopSpeaking() {
+    speakToken++;
+    if (window.speechSynthesis) speechSynthesis.cancel();
+    if (ttsAudio) { try { ttsAudio.pause(); } catch (e) {} }
+  }
+
+  function speakPhrase(text, onDone) {
+    if (!text) { onDone(); return; }
+    if (neuralOn()) { speakNeural(text, onDone); return; }
+    speakBrowser(text, onDone);
+  }
+
   // Chrome's better voices are network-backed and register late, so this runs
   // again on `voiceschanged` — and on every language change.
-  function refreshVoices() {
+  function refreshBrowserVoices() {
     if (!window.speechSynthesis) return;
     const all = speechSynthesis.getVoices() || [];
     const want = trance.lang.toLowerCase();
@@ -3841,7 +4440,7 @@
     }
   }
 
-  function speakPhrase(text, onDone) {
+  function speakBrowser(text, onDone) {
     if (!window.speechSynthesis || !text) { onDone(); return; }
     const u = new SpeechSynthesisUtterance(text);
     u.lang = trance.lang;
@@ -3898,6 +4497,7 @@
     tranceOn = true;
     tranceToggle.checked = true;
     phraseIdx = 0;
+    warmPhrases();
     // Settle into the bed before the first phrase lands.
     scheduleNextPhrase(Math.max(8000, trance.intervalSec * 1000));
     toast(trance.tone === "isochronic"
@@ -3909,7 +4509,7 @@
     tranceOn = false;
     clearTimeout(phraseTimer);
     clearTimeout(speakWatchdog);
-    if (window.speechSynthesis) speechSynthesis.cancel();
+    stopSpeaking();
     duckVideos(false);
     stopBed();
     tranceToggle.checked = false;
@@ -3922,7 +4522,18 @@
     tranceBeat.value = String(trance.beat);
     tranceTone.value = trance.tone;
     tranceNoise.value = trance.noise;
+    tranceEngine.value = trance.engine === "browser" ? "browser" : "neural";
     tranceLang.value = trance.lang;
+    if (!tranceLang.value && trance.lang) {
+      // A locale picked from the neural list isn't in the static three; keep it
+      // showing until fillNeuralLangs() replaces it with the proper name.
+      const o = document.createElement("option");
+      o.value = trance.lang;
+      o.textContent = trance.lang;
+      o.dataset.temp = "1";
+      tranceLang.appendChild(o);
+      tranceLang.value = trance.lang;
+    }
     if (!tranceLang.value) { tranceLang.value = "en-US"; trance.lang = "en-US"; }
     tranceGender.value = trance.gender || "female";
     tranceOrder.value = trance.order;
@@ -3950,7 +4561,9 @@
     trance.order = tranceOrder.value;
     trance.lang = tranceLang.value || "en-US";
     trance.gender = tranceGender.value || "female";
-    trance.voice = tranceVoice.value || "";
+    trance.engine = tranceEngine.value === "browser" ? "browser" : "neural";
+    if (trance.engine === "neural") trance.voiceNeural = tranceVoice.value || "";
+    else trance.voice = tranceVoice.value || "";
     trance.intervalSec = Math.min(300, Math.max(5, parseInt(tranceInterval.value, 10) || 20));
     trance.bedVolume = (parseInt(tranceBedVol.value, 10) || 0) / 100;
     trance.voiceVolume = (parseInt(tranceVoiceVol.value, 10) || 0) / 100;
@@ -4002,20 +4615,25 @@
   // survives either change, so it drops back to Auto.
   tranceLang.addEventListener("change", () => {
     trance.lang = tranceLang.value || "en-US";
-    trance.voice = "";
+    trance.voice = ""; trance.voiceNeural = "";
     refreshVoices();
   });
 
   tranceGender.addEventListener("change", () => {
     trance.gender = tranceGender.value || "female";
-    trance.voice = "";
+    trance.voice = ""; trance.voiceNeural = "";
+    refreshVoices();
+  });
+
+  tranceEngine.addEventListener("change", () => {
+    trance.engine = tranceEngine.value === "browser" ? "browser" : "neural";
     refreshVoices();
   });
 
   tranceTest.addEventListener("click", () => {
     readTranceForm();
     const text = trance.phrases[0] || TRANCE_SAMPLE[trance.lang] || TRANCE_SAMPLE["en-US"];
-    if (window.speechSynthesis) speechSynthesis.cancel();
+    stopSpeaking();
     speakPhrase(text, () => {});
   });
 
@@ -4033,7 +4651,9 @@
   });
 
   if (window.speechSynthesis) {
-    speechSynthesis.addEventListener("voiceschanged", refreshVoices);
+    speechSynthesis.addEventListener("voiceschanged", () => {
+      if (trance.engine !== "neural") refreshBrowserVoices();
+    });
   }
   tranceLoad();
   fillTranceForm();
@@ -4337,32 +4957,1500 @@
     poll();
   }
 
+  // Hand the URL to the browser's own downloader instead of pulling the file
+  // through JavaScript first. `resp.blob()` holds the entire result in the
+  // tab's memory before writing it, which is fine for a three-clip test and is
+  // a gigabyte or two for a fifty-clip wall — in a tab that is already playing
+  // fifty videos. The server already sends Content-Disposition: attachment, so
+  // the click downloads and the page stays put.
   function downloadCompileResult(jobId, skipped) {
-    fetch("/api/compile/result?id=" + encodeURIComponent(jobId))
-      .then(resp => {
-        if (!resp.ok) throw new Error("result not available (HTTP " + resp.status + ")");
-        return resp.blob();
-      })
-      .then(blob => {
-        const a = document.createElement("a");
-        a.href = URL.createObjectURL(blob);
-        a.download = "compilation.mp4";
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        setTimeout(() => URL.revokeObjectURL(a.href), 4000);
-        toast(skipped
-          ? ("Done — but " + skipped + " clip(s) couldn't be extracted and were skipped.")
-          : "Compilation ready! Downloading…", 4200);
-      })
-      .catch(err => toast("Compilation failed: " + (err.message || err), 5000))
-      .finally(() => setCompiling(false));
+    const a = document.createElement("a");
+    a.href = "/api/compile/result?id=" + encodeURIComponent(jobId);
+    a.download = "compilation.mp4";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    toast(skipped
+      ? ("Done — but " + skipped + " clip(s) couldn't be extracted and were skipped. "
+         + "The download is running in the browser.")
+      : "Compilation ready — the download is running in the browser.", 5200);
+    setCompiling(false);
   }
 
   compileBtn.addEventListener("click", openCompileModal);
   compileCancel.addEventListener("click", closeCompileModal);
   compileGo.addEventListener("click", doCompile);
   compileModal.addEventListener("click", (e) => { if (e.target === compileModal) closeCompileModal(); });
+
+  /* ---------- Channel: one page in, one compilation out ---------- */
+
+  // Everything here happens on the server: listing the page, measuring each
+  // video, picking the moment, cutting and joining. The browser only draws the
+  // bar. That is the whole point — the wall was never needed to make a
+  // compilation, and it is what made the machine crawl.
+
+  const channelModal = document.getElementById("channelModal");
+  const channelBtn = document.getElementById("channelBtn");
+  const chUrl = document.getElementById("chUrl");
+  const chLimit = document.getElementById("chLimit");
+  const chPreset = document.getElementById("chPreset");
+  const chRes = document.getElementById("chRes");
+  const chNote = document.getElementById("chNote");
+  const chProgress = document.getElementById("chProgress");
+  const chFill = document.getElementById("chFill");
+  const chStatus = document.getElementById("chStatus");
+  const chClips = document.getElementById("chClips");
+  const chListBtn = document.getElementById("chList");
+  const chGo = document.getElementById("chGo");
+  const chCloseBtn = document.getElementById("chClose");
+  let chRunning = false;
+
+  function chBar(pct, indeterminate) {
+    chFill.classList.toggle("indeterminate", !!indeterminate);
+    if (!indeterminate) chFill.style.width = Math.max(0, Math.min(100, pct)) + "%";
+  }
+
+  function chBusy(on) {
+    chRunning = on;
+    chProgress.classList.toggle("show", on);
+    chGo.disabled = on;
+    chListBtn.disabled = on;
+    chGo.textContent = on ? "Working…" : "⚡ Build the compilation";
+  }
+
+  function chOpen() {
+    channelModal.classList.add("open");
+    momClipStatus().then(st => {
+      if (st && st.presets && st.presets.length) {
+        chPreset.innerHTML = st.presets.map(p =>
+          '<option value="' + escapeHtml(p.id) + '">🎯 ' + escapeHtml(p.label) + "</option>"
+        ).join("");
+      }
+      if (st && !st.ready) {
+        chNote.textContent = st.deps
+          ? "the CLIP model still has to be downloaded — open 🎯 Moments once to fetch it"
+          : "needs numpy and onnxruntime on the server";
+      }
+    });
+  }
+
+  function chClose() {
+    if (chRunning && !confirm("The compilation is still being built. Close anyway? " +
+                              "It keeps running on the server.")) return;
+    channelModal.classList.remove("open");
+  }
+
+  function chCheck() {
+    const url = (chUrl.value || "").trim();
+    if (!url) { toast("Paste a performer or channel page first."); chUrl.focus(); return; }
+    chNote.textContent = "reading the page…";
+    fetch("/api/channel/list", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: url, limit: Number(chLimit.value) || 25 }),
+    })
+      .then(r => r.json())
+      .then(res => {
+        if (!res.ok) throw new Error(res.error || "could not read that page");
+        chNote.innerHTML = "<b>" + res.count + "</b> videos found";
+        chClips.innerHTML = res.videos.slice(0, 8).map(v =>
+          '<li><span class="what">' + escapeHtml(v.title) + "</span></li>").join("");
+      })
+      .catch(err => { chNote.textContent = String(err.message || err).slice(0, 140); });
+  }
+
+  function chStart() {
+    const url = (chUrl.value || "").trim();
+    if (!url) { toast("Paste a performer or channel page first."); chUrl.focus(); return; }
+    chBusy(true);
+    chBar(2, false);
+    chStatus.textContent = "Reading the page…";
+    chClips.innerHTML = "";
+
+    fetch("/api/channel/compile", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        url: url, limit: Number(chLimit.value) || 25,
+        preset: chPreset.value, resolution: chRes.value,
+      }),
+    })
+      .then(r => r.json())
+      .then(res => {
+        if (!res.ok) throw new Error(res.error || "could not start");
+        chPoll(res.job_id);
+      })
+      .catch(err => { toast("Failed: " + (err.message || err), 6000); chBusy(false); });
+  }
+
+  function chPoll(jobId) {
+    const tick = () => {
+      fetch("/api/channel/status?id=" + encodeURIComponent(jobId))
+        .then(r => r.json())
+        .then(s => {
+          if (!s.ok) throw new Error(s.error || "lost the job");
+          if (s.stage === "error") throw new Error(s.error || "failed");
+
+          if (s.clips && s.clips.length) {
+            chClips.innerHTML = s.clips.map(c =>
+              '<li><span class="when">' + secToTime(c.start) + "–" + secToTime(c.end) +
+              '</span><span class="what">' + escapeHtml(c.title) + "</span>" +
+              '<span class="score">' + Math.round(c.score * 100) + "%</span></li>").join("");
+          }
+
+          if (s.stage === "listing" || s.stage === "queued") {
+            chBar(3, true);
+            chStatus.textContent = "Reading the page…";
+          } else if (s.stage === "indexing") {
+            // Measuring is the long part, so it owns most of the bar.
+            const pct = s.total ? (s.done / s.total) * 70 : 0;
+            chBar(Math.max(4, pct), false);
+            chStatus.textContent = "Looking through video " + ((s.done || 0) + 1) +
+              " of " + s.total + " — found " + (s.found || 0) +
+              (s.current ? " · " + s.current : "");
+          } else if (s.stage === "cutting") {
+            const pct = s.total_cuts ? 70 + (s.cut_done / s.total_cuts) * 25 : 72;
+            chBar(pct, false);
+            chStatus.textContent = "Cutting clip " + ((s.cut_done || 0) + 1) +
+              " of " + s.total_cuts;
+          } else if (s.stage === "joining") {
+            chBar(96, false);
+            chStatus.textContent = "Joining " + s.total_cuts + " clips…";
+          }
+
+          if (s.ready) {
+            chBar(100, false);
+            chStatus.textContent = "Done — " + (s.found || 0) + " clips" +
+              (s.skipped ? " (" + s.skipped + " could not be cut)" : "") +
+              ". The download is running in the browser.";
+            const a = document.createElement("a");
+            a.href = "/api/compile/result?id=" + encodeURIComponent(s.compile_id);
+            a.download = "compilation.mp4";
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            chBusy(false);
+            if (s.missed && s.missed.length) {
+              toast(s.missed.length + " video(s) could not be read — see the server console.", 6000);
+            }
+            return;
+          }
+          setTimeout(tick, 1000);
+        })
+        .catch(err => { toast("Failed: " + (err.message || err), 7000); chBusy(false); });
+    };
+    tick();
+  }
+
+  channelBtn.addEventListener("click", chOpen);
+  chCloseBtn.addEventListener("click", chClose);
+  chListBtn.addEventListener("click", chCheck);
+  chGo.addEventListener("click", chStart);
+  chUrl.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); chStart(); }
+  });
+  channelModal.addEventListener("click", (e) => { if (e.target === channelModal) chClose(); });
+
+  /* ---------- Moments: let the server find the good parts ---------- */
+
+  // The server measures each video once (scene cuts, motion, loudness — plain
+  // ffmpeg, nothing paid) and hands back one value per second. Everything after
+  // that happens here: picking the peaks is a few array passes, so changing the
+  // clip length or the audio/motion balance re-marks the whole wall instantly
+  // instead of decoding anything again.
+
+  const momentsModal = document.getElementById("momentsModal");
+  const momentsBtn = document.getElementById("momentsBtn");
+  const momList = document.getElementById("momList");
+  const momClip = document.getElementById("momClip");
+  const momMax = document.getElementById("momMax");
+  const momFocus = document.getElementById("momFocus");
+  const momAnalyze = document.getElementById("momAnalyze");
+  const momTotal = document.getElementById("momTotal");
+  const momSend = document.getElementById("momSend");
+  const momClose = document.getElementById("momClose");
+  const momGroup = document.getElementById("momGroup");
+  const momFit = document.getElementById("momFit");
+  const momModel = document.getElementById("momModel");
+  const momExample = document.getElementById("momExample");
+  const momPreset = document.getElementById("momPreset");
+
+  // Presets as the server defines them, filled in from /api/clip/status.
+  let momPresets = [{ id: "cumshot", label: "Cumshot compilation", window: [0.6, 1] }];
+
+  function momPresetCfg() {
+    return momPresets.filter(p => p.id === momPreset.value)[0] || null;
+  }
+  const momSure = document.getElementById("momSure");
+  const momPad = document.getElementById("momPad");
+  const momWhere = document.getElementById("momWhere");
+
+  // [from, to] as fractions of each video, or null for all of it.
+  function momWindow() {
+    const parts = (momWhere.value || "0,1").split(",").map(Number);
+    return (parts[0] <= 0 && parts[1] >= 1) ? null : parts;
+  }
+  const momAuto = document.getElementById("momAuto");
+  const momPromptsInput = document.getElementById("momPrompts");
+  const momSearchBtn = document.getElementById("momSearch");
+  const momClipState = document.getElementById("momClipState");
+  const momMaxLabel = document.getElementById("momMaxLabel");
+
+  // The phrases currently being searched for, and the colour each one wears on
+  // the timeline and its chips.
+  let momLabels = [];
+  const MOM_COLORS = ["#4f8cff", "#ffc400", "#25d07a", "#ff5c8a",
+                      "#8f6bff", "#33d6e0", "#ff8a3d", "#b8c0cc"];
+
+  function momRgb(hex) {
+    return [1, 3, 5].map(i => parseInt(hex.substr(i, 2), 16)).join(",");
+  }
+
+  // Keyed by the original URL, not by tile: the measurement belongs to the
+  // video, so two tiles of the same source share it (and the disk cache).
+  const momState = new Map();
+  const momRows = new Map();      // key -> { row, canvas, chips, state }
+  const momQueue = [];            // keys waiting for a free analysis slot
+  let momRunning = 0;
+  const MOM_PARALLEL = 3;
+
+  function momKey(p) { return (p.raw || p.url || "").trim(); }
+
+  // One entry per distinct source on the wall, in tile order.
+  function momTiles() {
+    const seen = new Set();
+    const out = [];
+    players.forEach(p => {
+      const key = momKey(p);
+      if (!key || seen.has(key)) return;
+      seen.add(key);
+      out.push({ key, player: p, label: playerLabel(p) });
+    });
+    return out;
+  }
+
+  function momGet(key) {
+    let st = momState.get(key);
+    if (!st) {
+      st = { stage: "idle", at: 0, dur: 0, error: "", data: null, moments: [], manual: [],
+             clip: "idle", clipAt: 0, labels: null, count: 0 };
+      momState.set(key, st);
+    }
+    return st;
+  }
+
+  // ---- curve maths ----
+
+  function momPctl(sorted, q) {
+    if (!sorted.length) return 0;
+    const i = Math.max(0, Math.min(sorted.length - 1, Math.round(q * (sorted.length - 1))));
+    return sorted[i];
+  }
+
+  // Map a raw curve onto 0..1 using its own 10th/95th percentile, so a quiet
+  // video and a loud one are judged against themselves. Values at `floor`
+  // (digital silence, a frozen frame) are left out of the scale.
+  function momNorm(arr, floor) {
+    const live = arr.filter(v => v > floor).slice().sort((a, b) => a - b);
+    const lo = momPctl(live, 0.10), hi = momPctl(live, 0.95);
+    const span = hi - lo;
+    if (!(span > 1e-6)) return arr.map(() => 0);
+    return arr.map(v => Math.max(0, Math.min(1, (v - lo) / span)));
+  }
+
+  function momNearestCut(cuts, t, back, fwd) {
+    let best = null, bd = Infinity;
+    for (let i = 0; i < cuts.length; i++) {
+      const c = cuts[i];
+      if (c < t - back) continue;
+      if (c > t + fwd) break;
+      const d = Math.abs(c - t);
+      if (d < bd) { bd = d; best = c; }
+    }
+    return best;
+  }
+
+  // Rolling mean of `score` over windows of L seconds.
+  function momWindows(score, L) {
+    const n = score.length;
+    const win = new Array(Math.max(0, n - L + 1));
+    let sum = 0;
+    for (let i = 0; i < n; i++) {
+      sum += score[i];
+      if (i >= L) sum -= score[i - L];
+      if (i >= L - 1) win[i - L + 1] = sum / L;
+    }
+    return win;
+  }
+
+  // Greedy peak picking: take the best window, block its neighbourhood so the
+  // compilation doesn't end up as one long scene, repeat.
+  function momGreedy(win, n, L, max) {
+    const order = win.map((v, i) => [v, i]).sort((a, b) => b[0] - a[0]);
+    const best = order.length ? order[0][0] : 0;
+    // Relative floor: on a flat video nothing stands out, and returning ten
+    // identical "peaks" would only waste the user's time.
+    const minScore = Math.max(0.12, best * 0.45);
+    const gap = Math.max(2, Math.round(L * 0.5));
+    const blocked = new Uint8Array(n);
+    const taken = [];
+    for (let k = 0; k < order.length && taken.length < max; k++) {
+      const v = order[k][0], i = order[k][1];
+      if (v < minScore) break;
+      if (blocked[i]) continue;
+      taken.push({ i, v });
+      for (let j = Math.max(0, i - L - gap); j < Math.min(n, i + L + gap); j++) blocked[j] = 1;
+    }
+    return taken;
+  }
+
+  // Turn a window start into a clip, snapped to the surrounding scene cuts when
+  // there is one close by, so it begins on a shot instead of halfway through it.
+  function momSpan(i, L, dur, cuts) {
+    let start = momNearestCut(cuts, i, 2.5, 1.5);
+    if (start === null) start = i;
+    let end = momNearestCut(cuts, i + L, 1.5, 2.5);
+    if (end === null) end = i + L;
+    if (end - start < L * 0.6) end = start + L;
+    if (end - start > L * 2) end = start + L * 1.5;
+    return [Math.max(0, start), Math.min(dur, end)];
+  }
+
+  // What a tile can be marked from: the measured curves when it has them, and
+  // otherwise just the length CLIP saw (indexing alone is enough to search).
+  function momBase(st) {
+    if (st.data && st.data.motion.length) {
+      // The measured curves can be older than the tile and describe less of it
+      // (a stream that died mid-measurement). Whatever else is known about the
+      // length wins, or a clip gets clamped to before it began.
+      const known = Math.max(st.data.duration || 0, st.dur || 0,
+                             (st.offset || 0) + (st.count || 0));
+      return known > (st.data.duration || 0)
+        ? Object.assign({}, st.data, { duration: known })
+        : st.data;
+    }
+    if (st.count) {
+      // Without measured curves the only clock available is the player's, and
+      // failing that the end of the window that was searched.
+      const dur = st.dur || ((st.offset || 0) + st.count);
+      return { duration: dur, cuts: [], motion: [], loud: [], hasAudio: false,
+               step: 1, synthetic: true };
+    }
+    return null;
+  }
+
+  function momPick(st) {
+    const d = momBase(st);
+    if (!d) return [];
+    const clip = Number(momClip.value) || 8;
+    const max = Number(momMax.value) || 5;
+    const L = Math.max(2, Math.round(clip));
+
+    const labels = momLabels.filter(l => st.labels && st.labels[l]);
+    if (labels.length) return momPickLabels(st, d, labels, L, max);
+
+    const n = d.motion.length;
+    if (!n || n < L) return [];
+    const wAudio = d.hasAudio ? Number(momFocus.value) : 0;
+    const loud = momNorm(d.loud, -69.9);
+    const motion = momNorm(d.motion, 0);
+    const score = new Array(n);
+    for (let i = 0; i < n; i++) score[i] = wAudio * loud[i] + (1 - wAudio) * motion[i];
+
+    const dur = d.duration || n;
+    return momGreedy(momWindows(score, L), n, L, max)
+      .sort((a, b) => a.i - b.i)
+      .map(t => {
+        const [start, end] = momMargin(momSpan(t.i, L, dur, d.cuts), dur);
+        let ml = 0, mm = 0, c = 0;
+        for (let j = Math.floor(start); j < Math.min(n, Math.ceil(end)); j++) {
+          ml += loud[j]; mm += motion[j]; c++;
+        }
+        if (c) { ml /= c; mm /= c; }
+        return {
+          start, end, on: true, kind: "auto", score: t.v,
+          why: (wAudio > 0 && ml >= mm) ? "loud" : "motion",
+        };
+      })
+      .filter(m => m.end > m.start + 0.5);
+  }
+
+  // Centred moving average over ±r seconds: one odd frame should not decide
+  // where a clip begins.
+  function momSmooth(arr, r) {
+    const n = arr.length;
+    const pre = new Float64Array(n + 1);
+    for (let i = 0; i < n; i++) pre[i + 1] = pre[i] + arr[i];
+    const out = new Array(n);
+    for (let i = 0; i < n; i++) {
+      const a = Math.max(0, i - r), b = Math.min(n, i + r + 1);
+      out[i] = (pre[b] - pre[a]) / (b - a);
+    }
+    return out;
+  }
+
+  // Grow a clip out of a peak instead of stamping a fixed length on it: start
+  // at the best second and walk outwards while the match stays near its peak.
+  // A scene that matches for seventy seconds comes back seventy seconds long.
+  // `curve` is a share of the match in 0..1 (the server scores your phrase
+  // against a set of ordinary ones), so the thresholds here mean something
+  // absolute: `gate` is "how sure before this is worth cutting".
+  // Where a scene type ends the video — the moment runs to the credits — the
+  // clip to keep is the last stretch that scores near the top, not the single
+  // highest second. Something earlier in the video often looks more like the
+  // words than the real thing does.
+  function momLastStrong(s, frac) {
+    const top = Math.max.apply(null, s);
+    if (!(top > 0)) return -1;
+    const bar = top * frac;
+    let end = -1;
+    for (let i = s.length - 1; i >= 0; i--) if (s[i] >= bar) { end = i; break; }
+    if (end < 0) return -1;
+    let start = end;
+    while (start > 0 && s[start - 1] >= bar) start--;
+    let bi = start;
+    for (let i = start; i <= end; i++) if (s[i] > s[bi]) bi = i;
+    return bi;
+  }
+
+  function momRegions(curve, min, max, count, gate, preferLast) {
+    const n = curve.length;
+    if (!n) return [];
+    const s = momSmooth(curve, 2);
+    const used = new Uint8Array(n);
+    const out = [];
+    let first = 0;
+    for (let k = 0; k < count; k++) {
+      let bi = -1, bv = -1;
+      if (k === 0 && preferLast) {
+        bi = momLastStrong(s, 0.5);
+        bv = bi >= 0 ? s[bi] : -1;
+      }
+      if (bi < 0) {
+        for (let i = 0; i < n; i++) if (!used[i] && s[i] > bv) { bv = s[i]; bi = i; }
+      }
+      if (bi < 0 || bv < gate) break;
+      if (k === 0) first = bv;
+      // Later peaks only count while they are in the same league as the best
+      // one — otherwise "five per phrase" fills up with whatever is left.
+      else if (bv < first * 0.5) break;
+      // Half-maximum boundary: walk outwards while the match keeps half of its
+      // peak, which is where the scene itself ends rather than where a fixed
+      // clip length happens to fall. The gate decides WHETHER to cut, never how
+      // far the cut reaches — tying the two together used to chop the run-up off
+      // the front of a clip (measured: 35 s late on a moment that starts at
+      // 17:00; with this, it opens 54 s early instead).
+      const floor = Math.max(bv * 0.5, 0.05);
+      let a = bi, b = bi;
+      while (a > 0 && !used[a - 1] && s[a - 1] >= floor && (b - a + 1) < max) a--;
+      while (b < n - 1 && !used[b + 1] && s[b + 1] >= floor && (b - a + 1) < max) b++;
+      let start = a, end = b + 1;
+      if (end - start < min) {           // too short: centre a minimum-length clip on it
+        start = Math.max(0, start - Math.ceil((min - (end - start)) / 2));
+        end = Math.min(n, start + min);
+        start = Math.max(0, end - min);
+      }
+      for (let i = Math.max(0, start - 2); i < Math.min(n, end + 2); i++) used[i] = 1;
+      out.push({ start, end, peak: bv });
+    }
+    return out;
+  }
+
+  // Keep a little air on both sides: a clip that starts exactly on the action
+  // reads as a jump cut, and you usually want to see it coming.
+  function momMargin(span, dur) {
+    const pad = Number(momPad.value) || 0;
+    return [Math.max(0, span[0] - pad), Math.min(dur, span[1] + pad)];
+  }
+
+  // Snap both ends to nearby scene cuts, keeping the length the match asked for.
+  function momFitSpan(a, b, dur, cuts) {
+    const s = momNearestCut(cuts, a, 2.5, 1.5);
+    const e = momNearestCut(cuts, b, 1.5, 2.5);
+    return [Math.max(0, s === null ? a : s), Math.min(dur, e === null ? b : e)];
+  }
+
+  // One pass per phrase, so a compilation ends up carrying every type you asked
+  // for instead of only the strongest one. Where two phrases claim overlapping
+  // seconds, the better match keeps them.
+  function momPickLabels(st, d, labels, L, max) {
+    const fit = momFit.checked;
+    const maxLen = fit ? Math.min(240, Math.max(60, L * 12)) : L;
+    // The gate is a real threshold for phrases; for an example it only says how
+    // far down the peak the clip may reach, so it never blocks the one match.
+    const gate = Number(momSure.value);
+    const exampleLabel = momExample.value ? momExampleLabel(momExample.value) : null;
+    const out = [];
+    st.weak = [];
+    labels.forEach(label => {
+      const li = momLabels.indexOf(label);
+      const curve = st.labels[label];
+      const n = curve.length;
+      if (!n) return;
+      // A phrase is scored on an absolute scale, so "nothing here" is knowable.
+      // An example's curve is scaled to the video it came from, and what says
+      // "the model could not tell these seconds apart" is how much room there
+      // was between the ordinary second and the best one.
+      const byExample = label === momExampleLabel(momExample.value);
+      if (byExample) {
+        if (st.likeGap !== undefined && st.likeGap < 0.03) st.weak.push(label);
+      } else if (Math.max.apply(null, curve) < gate) {
+        st.weak.push(label);
+      }
+      const dur = d.duration || n;
+      const floor = label === exampleLabel ? Math.min(gate, 0.5) : gate;
+      const off = st.offset || 0;
+      const cfg = momPresetCfg();
+      const last = !!(cfg && cfg.prefer === "last" && label === cfg.label);
+      momRegions(curve, Math.min(L, n), Math.min(maxLen, n), max, floor, last).forEach(r => {
+        // r is in curve seconds; the video's clock starts `off` earlier.
+        const [start, end] = momMargin(
+          momFitSpan(r.start + off, r.end + off, dur, d.cuts), dur);
+        if (!(end > start + 0.5)) return;      // a clamp went wrong; keep no clip
+        let raw = 0, c = 0;
+        for (let j = Math.floor(start - off); j < Math.min(n, Math.ceil(end - off)); j++) {
+          if (j >= 0) { raw += curve[j]; c++; }
+        }
+        out.push({ start, end, on: true, kind: "label", score: r.peak,
+                   label, li, match: c ? raw / c : 0, why: label });
+      });
+    });
+    out.sort((a, b) => b.score - a.score);
+    const kept = [];
+    out.forEach(m => {
+      const clash = kept.some(k => Math.min(k.end, m.end) - Math.max(k.start, m.start)
+                                   > 0.5 * Math.min(k.end - k.start, m.end - m.start));
+      if (!clash) kept.push(m);
+    });
+    return kept.sort((a, b) => a.start - b.start);
+  }
+
+  // Re-mark one source from its (already measured) curves, keeping whatever the
+  // user drew by hand.
+  function momRemark(key) {
+    const st = momGet(key);
+    if (!momBase(st)) return;
+    const manual = st.manual.map(m => ({ start: m.start, end: m.end, on: m.on !== false,
+                                         kind: "manual", score: 1, why: "yours" }));
+    st.moments = momPick(st).concat(manual).sort((a, b) => a.start - b.start);
+  }
+
+  // ---- drawing ----
+
+  function momDraw(key) {
+    const refs = momRows.get(key);
+    if (!refs) return;
+    const canvas = refs.canvas;
+    const st = momGet(key);
+    const w = canvas.clientWidth || 600, h = 54;
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+
+    const d = momBase(st);
+    if (!d) return;
+    const n = d.motion.length;
+    const dur = d.duration || n || 1;
+    const X = t => Math.max(0, Math.min(w, t / dur * w));
+    const Y = v => h - 2 - v * (h - 6);
+
+    if (n) {
+      const loud = momNorm(d.loud, -69.9);
+      const motion = momNorm(d.motion, 0);
+      // Motion as a filled area, loudness as a line on top of it.
+      ctx.beginPath();
+      ctx.moveTo(0, h);
+      for (let i = 0; i < n; i++) ctx.lineTo(X(i + 0.5), Y(motion[i]));
+      ctx.lineTo(w, h);
+      ctx.closePath();
+      ctx.fillStyle = "rgba(143,107,255,.28)";
+      ctx.fill();
+
+      if (d.hasAudio) {
+        ctx.beginPath();
+        for (let i = 0; i < n; i++) {
+          const x = X(i + 0.5), y = Y(loud[i]);
+          i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+        }
+        ctx.strokeStyle = "rgba(79,140,255,.85)";
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+      }
+    }
+
+    // One line per phrase you searched for, in the colour its chips carry.
+    momLabels.forEach((label, li) => {
+      const curve = st.labels && st.labels[label];
+      if (!curve || !curve.length) return;
+      const off = st.offset || 0;
+      ctx.beginPath();
+      for (let i = 0; i < curve.length; i++) {
+        const x = X(off + i + 0.5), y = Y(Math.max(0, Math.min(1, curve[i])));
+        i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+      }
+      ctx.strokeStyle = MOM_COLORS[li % MOM_COLORS.length];
+      ctx.lineWidth = 1.3;
+      ctx.stroke();
+    });
+
+    ctx.fillStyle = "rgba(255,255,255,.10)";
+    d.cuts.forEach(c => ctx.fillRect(X(c), 0, 1, h));
+
+    st.moments.forEach(m => {
+      const x0 = X(m.start), x1 = Math.max(X(m.end), x0 + 2);
+      const tint = m.kind === "manual" ? "255,196,0"
+                 : m.kind === "label" ? momRgb(MOM_COLORS[m.li % MOM_COLORS.length])
+                 : "79,140,255";
+      ctx.fillStyle = m.on ? "rgba(" + tint + ",.30)" : "rgba(255,255,255,.07)";
+      ctx.fillRect(x0, 0, x1 - x0, h);
+      ctx.strokeStyle = m.on ? "rgba(" + tint + ",.9)" : "rgba(255,255,255,.25)";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x0 + .5, .5, Math.max(1, x1 - x0 - 1), h - 1);
+    });
+
+    if (refs.dragging) {
+      const x0 = X(Math.min(refs.dragA, refs.dragB)), x1 = X(Math.max(refs.dragA, refs.dragB));
+      ctx.fillStyle = "rgba(255,196,0,.25)";
+      ctx.fillRect(x0, 0, Math.max(2, x1 - x0), h);
+    }
+  }
+
+  function momChips(key) {
+    const refs = momRows.get(key);
+    if (!refs) return;
+    const st = momGet(key);
+    refs.chips.innerHTML = st.moments.map((m, i) => {
+      const colour = m.kind === "label" ? MOM_COLORS[m.li % MOM_COLORS.length]
+                   : m.kind === "manual" ? "#ffc400" : "#4f8cff";
+      const match = m.kind === "label" ? " " + Math.round(m.match * 100) + "%" : "";
+      return '<span class="mom-chip' + (m.on ? " on" : "") + '" data-i="' + i + '"' +
+        ' style="--dot:' + colour + '">' +
+        '<span class="dot"></span>' +
+        '<span class="seek" data-seek="1" title="Jump the tile here">▶</span>' +
+        secToTime(m.start) + "–" + secToTime(m.end) +
+        ' <span class="why">· ' + escapeHtml(m.why + match) + "</span>" +
+      "</span>";
+    }).join("");
+  }
+
+  function momStateText(key) {   // `key` is also how a row knows it is the example
+    const refs = momRows.get(key);
+    if (!refs) return;
+    const st = momGet(key);
+    const el = refs.state;
+    el.classList.toggle("err", st.stage === "error");
+    if (st.stage === "idle") el.textContent = "not measured";
+    else if (st.stage === "queued") el.textContent = "waiting…";
+    else if (st.stage === "running") {
+      el.textContent = st.dur
+        ? "measuring " + Math.round(st.at / st.dur * 100) + "%"
+        : "measuring " + secToTime(st.at);
+    } else if (st.stage === "error") el.textContent = st.error || "failed";
+    else {
+      const on = st.moments.filter(m => m.on).length;
+      const base = momBase(st);
+      el.textContent = on + " / " + st.moments.length + " moments · " +
+        secToTime(base ? base.duration : 0) +
+        (st.data ? (st.data.hasAudio ? "" : " · no audio") : " · from CLIP only");
+    }
+    // The text search runs on its own track, so it reports next to the rest.
+    if (st.clip === "queued") el.textContent = "waiting to index…";
+    else if (st.clip === "indexing") {
+      const total = st.dur || (st.data && st.data.duration) || 0;
+      el.textContent = total
+        ? "indexing " + Math.round(Math.min(1, st.clipAt / total) * 100) + "%"
+        : "indexing " + st.clipAt + " frames";
+    } else if (st.clip === "searching") el.textContent = "searching…";
+    else if (st.clip === "error") {
+      el.classList.add("err");
+      el.textContent = st.clipError || "search failed";
+    } else if (st.clip === "ready" && momExample.value === key) {
+      el.textContent = "★ this is the example";
+    } else if (st.clip === "ready" && st.count) {
+      // Say how much of the video the search could actually see: an index that
+      // stopped early is the one failure that looks like a bad answer.
+      const known = st.dur || (st.data && st.data.duration) || 0;
+      const off = st.offset || 0;
+      const win = momWindow();
+      const wanted = known ? known * (win ? win[1] - win[0] : 1) : 0;
+      const short = wanted && st.count < wanted * 0.9;
+      el.textContent += off
+        ? " · searched " + secToTime(off) + "–" + secToTime(off + st.count)
+        : " · searched " + secToTime(st.count);
+      if (short) { el.textContent += " of " + secToTime(wanted) + " ⚠"; el.classList.add("err"); }
+    }
+    if (st.clip === "ready" && st.weak && st.weak.length) {
+      // Marked anyway — but say so, because CLIP found nothing that stood out
+      // and the clips below are only the least-bad seconds.
+      el.textContent += " · nothing matched “" + st.weak.join("”, “") + "”";
+    }
+    if (st.clip === "ready" && st.likeGap !== undefined && momExample.value) {
+      // Footage that shares a performer and a room saturates the small models:
+      // every second lands within a whisker of every other, and no scoring can
+      // recover what the encoder did not separate.
+      el.textContent += " · gap " + st.likeGap.toFixed(3);
+      if (st.likeGap < 0.05 && momModel.value !== "l14") {
+        el.textContent += " (baixo — tente o modelo L/14)";
+      }
+    }
+    refs.run.textContent = st.stage === "ready" ? "↻ Again" : "🔎 Analyze";
+    refs.run.disabled = st.stage === "running" || st.stage === "queued";
+    refs.find.disabled = st.clip === "indexing" || st.clip === "queued" || st.clip === "searching";
+  }
+
+  function momTotals() {
+    let count = 0, secs = 0;
+    momTiles().forEach(t => {
+      momGet(t.key).moments.forEach(m => { if (m.on) { count++; secs += m.end - m.start; } });
+    });
+    momTotal.innerHTML = "<b>" + count + "</b> moment" + (count === 1 ? "" : "s") +
+      " · " + secs.toFixed(1) + " s total";
+    momSend.disabled = !count;
+  }
+
+  function momRefresh(key) {
+    momDraw(key);
+    momChips(key);
+    momStateText(key);
+    momTotals();
+  }
+
+  // ---- rows ----
+
+  function momFillExamples() {
+    const prev = momExample.value;
+    momExample.innerHTML = '<option value="">Example: none · use words</option>' +
+      momTiles().map(t => '<option value="' + escapeHtml(t.key) + '">Like ' +
+        escapeHtml(t.label) + "</option>").join("");
+    if (momTiles().some(t => t.key === prev)) momExample.value = prev;
+  }
+
+  function momBuildRows() {
+    momFillExamples();
+    momRows.clear();
+    momList.innerHTML = "";
+    momTiles().forEach(t => {
+      const row = document.createElement("div");
+      row.className = "mom-row";
+      row.innerHTML =
+        '<div class="mom-head">' +
+          '<span class="mom-title">' + escapeHtml(t.label) + "</span>" +
+          '<span class="mom-state"></span>' +
+          '<button type="button" class="mom-run">🔎 Analyze</button>' +
+          '<button type="button" class="mom-find" title="Index this tile with CLIP and search it for the phrases above">🧠 Find</button>' +
+          '<button type="button" class="mom-all" title="Tick every moment">All</button>' +
+          '<button type="button" class="mom-none" title="Untick every moment">None</button>' +
+        "</div>" +
+        '<canvas class="mom-canvas"></canvas>' +
+        '<div class="mom-chips"></div>';
+      momList.appendChild(row);
+
+      const refs = {
+        row,
+        canvas: row.querySelector(".mom-canvas"),
+        chips: row.querySelector(".mom-chips"),
+        state: row.querySelector(".mom-state"),
+        run: row.querySelector(".mom-run"),
+        find: row.querySelector(".mom-find"),
+        player: t.player,
+        dragging: false, dragA: 0, dragB: 0,
+      };
+      momRows.set(t.key, refs);
+
+      refs.run.addEventListener("click", () => momAnalyzeOne(t.key, true));
+      refs.find.addEventListener("click", () => momRunSearch([t.key]));
+      row.querySelector(".mom-all").addEventListener("click", () => {
+        momGet(t.key).moments.forEach(m => { m.on = true; });
+        momSyncManual(t.key);
+        momRefresh(t.key);
+      });
+      row.querySelector(".mom-none").addEventListener("click", () => {
+        momGet(t.key).moments.forEach(m => { m.on = false; });
+        momSyncManual(t.key);
+        momRefresh(t.key);
+      });
+      refs.chips.addEventListener("click", (e) => {
+        const chip = e.target.closest(".mom-chip");
+        if (!chip) return;
+        const m = momGet(t.key).moments[Number(chip.dataset.i)];
+        if (!m) return;
+        if (e.target.dataset.seek) { momSeek(t.key, m.start); return; }
+        m.on = !m.on;
+        momSyncManual(t.key);
+        momRefresh(t.key);
+      });
+      momCanvasEvents(t.key, refs);
+      momRefresh(t.key);
+    });
+  }
+
+  // Keep the hand-drawn list in step with the selection, so re-marking (which
+  // rebuilds the automatic picks) never loses what the user drew.
+  function momSyncManual(key) {
+    const st = momGet(key);
+    st.manual = st.moments.filter(m => m.kind === "manual")
+      .map(m => ({ start: m.start, end: m.end, on: m.on }));
+  }
+
+  function momSeek(key, t) {
+    const refs = momRows.get(key);
+    const p = refs && refs.player;
+    const v = p && p.media;
+    if (!v || v.tagName !== "VIDEO") { toast("This tile can't be seeked from here (embedded player).", 3000); return; }
+    try { v.currentTime = t; } catch (err) { /* not seekable yet */ }
+  }
+
+  function momCanvasEvents(key, refs) {
+    const canvas = refs.canvas;
+    const timeAt = (ev) => {
+      const st = momGet(key);
+      const d = st.data;
+      if (!d) return null;
+      const r = canvas.getBoundingClientRect();
+      const x = Math.max(0, Math.min(r.width, ev.clientX - r.left));
+      return x / r.width * (d.duration || 1);
+    };
+
+    canvas.addEventListener("mousedown", (ev) => {
+      const t = timeAt(ev);
+      if (t === null) return;
+      refs.dragging = true;
+      refs.dragA = refs.dragB = t;
+      refs.moved = false;
+    });
+    canvas.addEventListener("mousemove", (ev) => {
+      if (!refs.dragging) return;
+      const t = timeAt(ev);
+      if (t === null) return;
+      if (Math.abs(t - refs.dragA) > 0.3) refs.moved = true;
+      refs.dragB = t;
+      momDraw(key);
+    });
+    const finish = (ev) => {
+      if (!refs.dragging) return;
+      refs.dragging = false;
+      const st = momGet(key);
+      const t = timeAt(ev);
+      if (t !== null) refs.dragB = t;
+      const a = Math.min(refs.dragA, refs.dragB), b = Math.max(refs.dragA, refs.dragB);
+
+      if (!refs.moved || b - a < 0.5) {
+        // A plain click: toggle a moment if one is under the cursor, else jump
+        // the tile there.
+        const hit = st.moments.find(m => a >= m.start - 0.2 && a <= m.end + 0.2);
+        if (hit) { hit.on = !hit.on; momSyncManual(key); momRefresh(key); }
+        else momSeek(key, a);
+        momDraw(key);
+        return;
+      }
+      st.moments.push({ start: a, end: b, on: true, kind: "manual", score: 1, why: "yours" });
+      st.moments.sort((x, y) => x.start - y.start);
+      momSyncManual(key);
+      momRefresh(key);
+    };
+    canvas.addEventListener("mouseup", finish);
+    canvas.addEventListener("mouseleave", (ev) => { if (refs.dragging) finish(ev); });
+  }
+
+  // ---- running the measurement ----
+
+  function momAnalyzeOne(key, fresh) {
+    const st = momGet(key);
+    if (st.stage === "running" || st.stage === "queued") return;
+    st.stage = "queued";
+    st.error = "";
+    st.at = 0;
+    momStateText(key);
+    momQueue.push({ key, kind: "analyze", fresh: !!fresh });
+    momPump();
+  }
+
+  function momPump() {
+    while (momRunning < MOM_PARALLEL && momQueue.length) {
+      const job = momQueue.shift();
+      momRunning++;
+      const run = job.kind === "clip" ? momStartClip(job.key) : momStart(job.key, job.fresh);
+      run.finally(() => { momRunning--; momPump(); });
+    }
+    if (!momRunning && !momQueue.length && momIdle.length) {
+      const waiting = momIdle.splice(0);
+      waiting.forEach(fn => fn());
+    }
+  }
+
+  // Run `fn` once every queued measurement and search has finished.
+  const momIdle = [];
+  function momWhenIdle(fn) { momIdle.push(fn); momPump(); }
+
+  function momStart(key, fresh) {
+    const st = momGet(key);
+    const refs = momRows.get(key);
+    const player = refs && refs.player;
+    const media = player && player.media;
+    st.stage = "running";
+    st.at = 0;
+    st.dur = (media && media.duration && isFinite(media.duration)) ? media.duration : 0;
+    momStateText(key);
+
+    return fetch("/api/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        url: key,
+        quality: Number(player && player.quality) || 0,
+        duration: st.dur,
+        fresh: !!fresh,
+      }),
+    })
+      .then(r => r.json())
+      .then(res => {
+        if (!res.ok) throw new Error(res.error || "could not start");
+        if (res.cached && res.data) return res.data;
+        return momPoll(key, res.job_id);
+      })
+      .then(data => {
+        st.data = data;
+        st.stage = "ready";
+        momRemark(key);
+        momRefresh(key);
+      })
+      .catch(err => {
+        st.stage = "error";
+        st.error = String(err.message || err).slice(0, 120);
+        momStateText(key);
+      });
+  }
+
+  function momPoll(key, jobId) {
+    const st = momGet(key);
+    return new Promise((resolve, reject) => {
+      const tick = () => {
+        fetch("/api/analyze/status?id=" + encodeURIComponent(jobId))
+          .then(r => r.json())
+          .then(s => {
+            if (!s.ok) throw new Error(s.error || "lost the job");
+            if (s.stage === "error") throw new Error(s.error || "analysis failed");
+            st.at = s.at || 0;
+            if (s.dur) st.dur = s.dur;
+            momStateText(key);
+            if (!s.ready) { setTimeout(tick, 600); return; }
+            fetch("/api/analyze/result?id=" + encodeURIComponent(jobId))
+              .then(r => r.json())
+              .then(res => {
+                if (!res.ok) throw new Error(res.error || "no result");
+                resolve(res.data);
+              })
+              .catch(reject);
+          })
+          .catch(reject);
+      };
+      tick();
+    });
+  }
+
+  // ---- searching by words (CLIP, running on this machine) ----
+
+  // The phrases, as typed: commas separate them, blanks and repeats drop out.
+  function momPromptList() {
+    const seen = new Set();
+    return (momPromptsInput.value || "").split(",")
+      .map(s => s.trim().replace(/\s+/g, " "))
+      .filter(s => s && !seen.has(s.toLowerCase()) && seen.add(s.toLowerCase()))
+      .slice(0, 8);
+  }
+
+  function momModelLabel() {
+    return "CLIP " + momModel.options[momModel.selectedIndex].textContent.split(" ·")[0];
+  }
+
+  // Short name for the example tile, used as the label on its clips.
+  function momExampleLabel(key) {
+    const tile = momTiles().filter(t => t.key === key)[0];
+    return "like " + ((tile && tile.label.split(" · ")[0]) || "example");
+  }
+
+  // Bumped together with API_VERSION in server.py.
+  const MOM_API = 3;
+  let momWarnedStale = false;
+
+  function momClipStatus() {
+    return fetch("/api/clip/status?model=" + encodeURIComponent(momModel.value))
+      .then(r => r.json())
+      .then(st => {
+        // The panel and the server are one program shipped in two files; when
+        // they disagree, say so here rather than 404 at the first request.
+        if (st && st.ok && !(st.api >= MOM_API) && !momWarnedStale) {
+          momWarnedStale = true;
+          toast("The server is running an older build than this page — stop it and " +
+                "start server.py again, or searching by example will not work.", 9000);
+        }
+        return st;
+      })
+      .catch(() => ({ ok: false }));
+  }
+
+  function momStale(st) { return !(st && st.api >= MOM_API); }
+
+  function momShowClip(st) {
+    if (!st || !st.ok) { momClipState.textContent = ""; return; }
+    if (!st.deps) {
+      momClipState.textContent = "text search needs: pip install numpy onnxruntime";
+    } else if (st.setup && st.setup.stage === "downloading") {
+      const pct = st.setup.total ? Math.round(st.setup.at / st.setup.total * 100) : 0;
+      momClipState.textContent = "downloading the CLIP model… " + pct + "%";
+    } else if (st.missing && st.missing.length) {
+      momClipState.textContent = momModelLabel() + " not downloaded (" +
+        Math.round(st.bytes / 1048576) + " MB, one time)";
+    } else {
+      momClipState.textContent = momModelLabel() + " ready" +
+        (st.provider ? " · " + st.provider.replace("ExecutionProvider", "")
+                     : st.gpu ? " · GPU available" : " · CPU");
+    }
+  }
+
+  // Fetch the model once, showing progress, and resolve when it is usable.
+  function momEnsureModel(status) {
+    if (status.missing && !status.missing.length) return Promise.resolve(true);
+    const mb = Math.round(status.bytes / 1048576);
+    if (!(status.setup && status.setup.stage === "downloading") &&
+        !confirm("Searching by words needs " + momModelLabel() + ": " + mb +
+                 " MB, downloaded once and kept. Download it now?")) {
+      return Promise.resolve(false);
+    }
+    return fetch("/api/clip/setup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: momModel.value }),
+    })
+      .then(r => r.json())
+      .then(res => {
+        if (!res.ok) throw new Error(res.error || "could not start the download");
+        return new Promise((resolve, reject) => {
+          const tick = () => momClipStatus().then(st => {
+            momShowClip(st);
+            if (st.setup && st.setup.stage === "error") return reject(new Error(st.setup.error));
+            if (st.missing && !st.missing.length) return resolve(true);
+            setTimeout(tick, 700);
+          });
+          tick();
+        });
+      });
+  }
+
+  // Index whatever needs indexing, then score every tile against the phrases.
+  function momRunSearch(only) {
+    const prompts = momPromptList();
+    const preset = momPresetCfg();
+    const example = preset ? "" : momExample.value;
+    if (!preset && !prompts.length && !example) {
+      toast("Pick a scene type, type what you are looking for, or choose an example tile.", 4200);
+      momPromptsInput.focus();
+      return;
+    }
+    if (!preset && prompts.length > 1) {
+      // Worth saying: the phrases share one softmax, so a broad one ("a couple
+      // in bed") drowns the narrow one you actually care about.
+      toast("Tip: phrases compete with each other — for one precise moment, search one phrase at a time.", 5000);
+    }
+    momLabels = preset ? [preset.label]
+              : example ? [momExampleLabel(example)].concat(prompts)
+              : prompts;
+    momMaxLabel.textContent = "Per phrase";
+    momClipState.textContent = "checking the model…";
+
+    return momClipStatus().then(status => {
+      momShowClip(status);
+      if (momStale(status) && momExample.value) {
+        momClipState.textContent = "server too old for the example search";
+        toast("Searching by example needs the current server: stop server.py and start it " +
+              "again, then press 🧠 Search.", 9000);
+        return;
+      }
+      if (!status.ok || !status.deps) {
+        toast("Text search needs numpy and onnxruntime on the server: " +
+              "pip install numpy onnxruntime (or onnxruntime-directml for the GPU), then restart it.", 6000);
+        return;
+      }
+      return momEnsureModel(status).then(ready => {
+        if (!ready) return;
+        const keys = (only || momTiles().map(t => t.key)).slice();
+        if (example && keys.indexOf(example) < 0) keys.unshift(example);
+        const enqueue = () => {
+          keys.forEach(key => {
+            const st = momGet(key);
+            if (st.clip === "indexing" || st.clip === "queued" || st.clip === "searching") return;
+            st.clip = "queued";
+            st.clipError = "";
+            momStateText(key);
+            momQueue.push({ key, kind: "clip" });
+          });
+          momPump();
+        };
+        // Nothing can be compared to the example until the example itself has
+        // been through the encoder, so that one goes first, alone.
+        if (!example) return enqueue();
+        return momEnsureIndexed(example, true).then(enqueue, err => {
+          momGet(example).clip = "error";
+          momGet(example).clipError = String(err.message || err).slice(0, 120);
+          momStateText(example);
+          toast("Could not index the example tile: " + (err.message || err), 5000);
+        });
+      });
+    }).catch(err => {
+      momClipState.textContent = "";
+      toast("Text search failed: " + (err.message || err), 5000);
+    });
+  }
+
+  // Index one tile, at most once at a time: an example tile is asked for by
+  // every other tile at the same moment, and they should all wait on the one
+  // pass rather than start their own.
+  const momIndexing = new Map();
+
+  function momQuality(key) {
+    const refs = momRows.get(key);
+    return Number(refs && refs.player && refs.player.quality) || 0;
+  }
+
+  function momEnsureIndexed(key, whole) {
+    const running = momIndexing.get(key);
+    if (running) return running;
+    const st = momGet(key);
+    const refs = momRows.get(key);
+    const media = refs && refs.player && refs.player.media;
+    if (!st.dur && media && media.duration && isFinite(media.duration)) st.dur = media.duration;
+    st.clip = "indexing";
+    st.clipAt = 0;
+    momStateText(key);
+
+    const job = fetch("/api/clip/index", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: key, duration: st.dur, model: momModel.value,
+                             window: whole ? null : momWindow() }),
+    })
+      .then(r => r.json())
+      .then(res => {
+        if (!res.ok) throw new Error(res.error || "could not index");
+        if (res.cached) return res.count;
+        return momPollClip(key, res.job_id);
+      })
+      .then(count => { momIndexing.delete(key); return count; },
+            err => { momIndexing.delete(key); throw err; });
+    momIndexing.set(key, job);
+    return job;
+  }
+
+  function momStartClip(key) {
+    const st = momGet(key);
+    const quality = momQuality(key);
+
+    return momEnsureIndexed(key)
+      .then(() => {
+        st.clip = "searching";
+        momStateText(key);
+        const preset = momPresetCfg();
+        const prompts = momPromptList();
+        const example = preset ? "" : momExample.value;
+        const jobs = [];
+        if (preset || prompts.length) {
+          jobs.push(fetch("/api/clip/search", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url: key, prompts: prompts, model: momModel.value,
+                                   preset: preset ? preset.id : null,
+                                   window: momWindow() }),
+          }).then(r => r.json()).then(res => {
+            if (!res.ok) throw new Error(res.error || "search failed");
+            st.count = res.count;
+            st.offset = res.offset || 0;
+            return res.scores;
+          }));
+        }
+        if (example && example !== key) {
+          const refPlayer = (momRows.get(example) || {}).player;
+          jobs.push(fetch("/api/clip/similar", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              url: key, ref: example, model: momModel.value,
+              window: momWindow(),
+            }),
+          }).then(r => r.json()).then(res => {
+            if (!res.ok) throw new Error(res.error || "example match failed");
+            st.count = res.count;
+            st.offset = res.offset || 0;
+            st.likeGap = (res.quality || {}).gap;
+            const out = {};
+            out[momExampleLabel(example)] = res.curve;
+            return out;
+          }));
+        }
+        return Promise.all(jobs);
+      })
+      .then(parts => {
+        st.labels = Object.assign.apply(null, [{}].concat(parts || []));
+        st.clip = "ready";
+        if (st.stage === "idle") st.stage = "ready";
+        momRemark(key);
+        momRefresh(key);
+      })
+      .catch(err => {
+        st.clip = "error";
+        st.clipError = String(err.message || err).slice(0, 120);
+        momStateText(key);
+      });
+  }
+
+  function momPollClip(key, jobId) {
+    const st = momGet(key);
+    return new Promise((resolve, reject) => {
+      const tick = () => {
+        fetch("/api/clip/index/status?id=" + encodeURIComponent(jobId))
+          .then(r => r.json())
+          .then(s => {
+            if (!s.ok) throw new Error(s.error || "lost the job");
+            if (s.stage === "error") throw new Error(s.error || "indexing failed");
+            st.clipAt = s.at || 0;
+            momStateText(key);
+            if (s.ready) return resolve(s.count);
+            setTimeout(tick, 700);
+          })
+          .catch(reject);
+      };
+      tick();
+    });
+  }
+
+  // ---- modal wiring ----
+
+  function openMomentsModal() {
+    if (!players.length) { toast("Add at least one video first."); return; }
+    // The rows have to exist inside a visible modal before anything is drawn:
+    // a canvas in a hidden element measures zero wide.
+    momentsModal.classList.add("open");
+    momBuildRows();
+    momTotals();
+    // Only ask for curves that already exist. Measuring is minutes of decoding
+    // on a big wall, so it stays an explicit click.
+    momTiles().forEach(t => {
+      if (momGet(t.key).stage === "idle") momProbe(t.key);
+    });
+    momClipStatus().then(st => {
+      momShowClip(st);
+      if (st && st.presets && st.presets.length) {
+        momPresets = st.presets;
+        const keep = momPreset.value;
+        momPreset.innerHTML = st.presets.map(p =>
+          '<option value="' + escapeHtml(p.id) + '">🎯 ' + escapeHtml(p.label) + "</option>"
+        ).join("") + '<option value="">Custom · my own words</option>';
+        // "" is Custom, and a deliberate choice: rebuilding the list must not
+        // quietly put the preset back.
+        momPreset.value = (keep === "" || st.presets.some(p => p.id === keep))
+          ? keep : st.presets[0].id;
+      }
+      momApplyPreset();
+    });
+  }
+
+  // Cheap "is this one already measured?" — returns the cached curves or
+  // nothing, and never starts a job.
+  function momProbe(key) {
+    const st = momGet(key);
+    return fetch("/api/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: key, probe: true }),
+    })
+      .then(r => r.json())
+      .then(res => {
+        if (!res.ok || !res.data || st.stage !== "idle") return;
+        st.data = res.data;
+        st.stage = "ready";
+        momRemark(key);
+        momRefresh(key);
+      })
+      .catch(() => {});
+  }
+
+  function closeMomentsModal() { momentsModal.classList.remove("open"); }
+
+  function momSendToCompile() {
+    const picked = [];
+    momTiles().forEach(t => {
+      const st = momGet(t.key);
+      st.moments.forEach(m => {
+        if (m.on) picked.push({ tile: t, m });
+      });
+    });
+    if (!picked.length) { toast("Tick at least one moment first."); return false; }
+
+    // Grouped by phrase, a compilation plays as chapters — every "kiss" from
+    // every tile, then every "goal" — instead of jumping between them.
+    const group = momGroup.checked && momLabels.length;
+    if (group) {
+      picked.sort((a, b) =>
+        (a.m.kind === "label" ? a.m.li : 99) - (b.m.kind === "label" ? b.m.li : 99) ||
+        a.m.start - b.m.start);
+    }
+    let added = 0;
+    picked.forEach(p => {
+      const start = Math.max(0, p.m.start);
+      if (!(p.m.end > start + 0.5)) return;
+      const dup = compileCuts.some(c => c.url === p.tile.key &&
+        Math.abs(c.start - start) < 0.5 && Math.abs(c.end - p.m.end) < 0.5);
+      if (dup) return;
+      compileCuts.push({
+        url: p.tile.key,
+        title: p.tile.label + (p.m.kind === "label" ? " · " + p.m.label : ""),
+        start: start,
+        end: p.m.end,
+      });
+      added++;
+    });
+    if (!added) { toast("Those moments are already in the cut list.", 3200); return false; }
+    closeMomentsModal();
+    openCompileModal();
+    toast(added + " moment" + (added === 1 ? "" : "s") + " added to the compilation.", 3200);
+    return true;
+  }
+
+  // One button for the whole job: search (or measure) every tile, keep what
+  // clears the confidence bar, and go straight to the export.
+  function momAutoEdit() {
+    // Auto-edit means "make this compilation", so it starts from an empty cut
+    // list. Leaving the previous attempt in there is how a run ends up
+    // exporting clips from tiles that are not even on the wall any more.
+    if (compileCuts.length) {
+      compileCuts.length = 0;
+      renderCutList();
+    }
+    const cfg = momPresetCfg();
+    const searching = cfg || momPromptList().length || momExample.value;
+    const started = searching
+      ? momRunSearch(null)
+      : Promise.resolve(momTiles().forEach(t => {
+          if (momGet(t.key).stage !== "ready") momAnalyzeOne(t.key, false);
+        }));
+    toast(cfg ? "Auto-edit: looking for " + cfg.label.toLowerCase() + " in every tile…"
+         : searching ? "Auto-edit: searching every tile…"
+         : "Auto-edit: measuring every tile…", 3000);
+    Promise.resolve(started).then(() => momWhenIdle(() => {
+      if (momSendToCompile()) doCompile();
+    }));
+  }
+
+  momSearchBtn.addEventListener("click", () => momRunSearch(null));
+  momPromptsInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); momRunSearch(null); }
+  });
+  // Emptying the box hands the wall back to scene cuts, motion and loudness.
+  momPromptsInput.addEventListener("input", () => {
+    if (momPromptsInput.value.trim() || !momLabels.length) return;
+    momLabels = [];
+    momMaxLabel.textContent = "Per video";
+    momTiles().forEach(t => {
+      if (momBase(momGet(t.key))) { momRemark(t.key); momRefresh(t.key); }
+    });
+  });
+
+  momentsBtn.addEventListener("click", openMomentsModal);
+  momClose.addEventListener("click", closeMomentsModal);
+  momSend.addEventListener("click", momSendToCompile);
+  momAuto.addEventListener("click", momAutoEdit);
+  momentsModal.addEventListener("click", (e) => { if (e.target === momentsModal) closeMomentsModal(); });
+  momAnalyze.addEventListener("click", () => {
+    const todo = momTiles().filter(t => momGet(t.key).stage !== "ready");
+    if (!todo.length) { toast("Every tile is already measured — press ↻ on a row to redo one.", 3600); return; }
+    todo.forEach(t => momAnalyzeOne(t.key, false));
+  });
+  momExample.addEventListener("change", () => {
+    if (momExample.value) momRunSearch(null);
+  });
+
+  function momApplyPreset() {
+    const cfg = momPresetCfg();
+    momPromptsInput.disabled = !!cfg;
+    momExample.disabled = !!cfg;
+    momPromptsInput.placeholder = cfg
+      ? "Using the tuned phrase bank for “" + cfg.label + "”"
+      : "Describe the moments: kiss, explosion, close-up of a face…  (English works best)";
+    if (cfg && cfg.model && momModel.value !== cfg.model &&
+        [...momModel.options].some(o => o.value === cfg.model)) {
+      // A preset knows which encoder can actually see its scene type; measured
+      // per preset, not guessed.
+      momModel.value = cfg.model;
+    }
+    if (cfg && cfg.gate) {
+      const want = String(cfg.gate);
+      if ([...momSure.options].some(o => o.value === want)) momSure.value = want;
+    }
+    if (cfg && cfg.window) {
+      // Where that kind of scene lives. Measured: searching the whole video
+      // finds convincing peaks in the first two minutes; searching the end
+      // does not.
+      const want = cfg.window[0] + "," + cfg.window[1];
+      const opt = [...momWhere.options].filter(o => Math.abs(Number(o.value.split(",")[0])
+                                                             - cfg.window[0]) < 0.08)[0];
+      if (opt) momWhere.value = opt.value;
+      else momWhere.value = want;
+    }
+    momClearCurves();
+  }
+
+  function momClearCurves() {
+    momTiles().forEach(t => {
+      const st = momGet(t.key);
+      if (!st.labels) return;
+      st.labels = null;
+      st.offset = 0;
+      st.clip = "idle";
+      momRemark(t.key);
+      momRefresh(t.key);
+    });
+  }
+
+  momPreset.addEventListener("change", momApplyPreset);
+
+  momWhere.addEventListener("change", () => {
+    // A different stretch is a different index: the curves on screen describe
+    // seconds that are no longer being looked at.
+    momTiles().forEach(t => {
+      const st = momGet(t.key);
+      if (!st.labels) return;
+      st.labels = null;
+      st.offset = 0;
+      st.clip = "idle";
+      momRemark(t.key);
+      momRefresh(t.key);
+    });
+  });
+
+  momModel.addEventListener("change", () => {
+    // A different model means different vectors: the old curves cannot be
+    // compared against the new ones, so they go and the wall waits for Search.
+    momTiles().forEach(t => {
+      const st = momGet(t.key);
+      if (!st.labels) return;
+      st.labels = null;
+      st.clip = "idle";
+      momRemark(t.key);
+      momRefresh(t.key);
+    });
+    momClipStatus().then(momShowClip);
+  });
+
+  [momClip, momMax, momFocus, momFit, momSure, momPad].forEach(sel => sel.addEventListener("change", () => {
+    momTiles().forEach(t => {
+      if (momBase(momGet(t.key))) { momRemark(t.key); momRefresh(t.key); }
+    });
+  }));
+  window.addEventListener("resize", () => {
+    if (momentsModal.classList.contains("open")) momRows.forEach((_, key) => momDraw(key));
+  });
 
   clearBtn.addEventListener("click", () => {
     if (players.length && confirm("Remove all players?")) {
@@ -4470,6 +6558,7 @@
           type: d.isHls ? "hls" : "file",
           url: d.url,
           title: d.title || pick,
+          page: pageUrl || "",
         });
       })
       .catch(() => toast(
