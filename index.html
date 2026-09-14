@@ -478,6 +478,36 @@
 
   /* Compile modal */
   .modal.wide { max-width: 620px; }
+
+  /* ---- Cast ---- */
+  #castBtn.live { border-color: #2ecc71; color: #2ecc71; }
+  .cast-card { display: flex; align-items: center; gap: 12px; padding: 12px 14px;
+               border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); }
+  .cast-card .who { flex: 1; min-width: 0; }
+  .cast-name { font-weight: 700; }
+  .cast-state { flex: none; font-size: 12px; padding: 4px 10px; border-radius: 999px;
+                border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
+  .cast-state.on { border-color: #2ecc71; color: #2ecc71; }
+  .cast-state.err { border-color: #e74c3c; color: #e74c3c; }
+  .cast-status { white-space: pre-line; line-height: 1.45; }
+  .cast-tools { display: flex; align-items: center; gap: 6px; }
+  .cast-tools label { cursor: pointer; font-size: 13px; }
+  .cast-pair summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+  .cast-devices { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  .cast-devices li { display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+                     border: 1px solid var(--border); border-radius: 8px; font-size: 13px; }
+  .cast-devices li.blocked { opacity: .55; }
+  .cast-devices .who { flex: 1; min-width: 0; }
+  .cast-devices .ident { font-family: ui-monospace, Consolas, monospace; font-size: 11px; color: var(--muted); }
+  .cast-tag { flex: none; font-size: 11px; padding: 3px 8px; border-radius: 999px;
+              border: 1px solid var(--border); color: var(--muted); }
+  .cast-tag.warn { border-color: #e67e22; color: #e67e22; }
+  /* The clock lives inside #grid so it survives fullscreen; fixed-position
+     children do not take part in the grid layout. */
+  #castClockEl { position: fixed; right: 14px; bottom: 14px; z-index: 90; display: none; pointer-events: none;
+                 font: 700 22px/1 ui-monospace, Consolas, monospace; color: #fff;
+                 background: rgba(0,0,0,.65); padding: 6px 10px; border-radius: 8px; }
+  #castClockEl.show { display: block; }
   .cut-builder {
     display: flex;
     flex-wrap: wrap;
@@ -709,6 +739,82 @@
   .ch-clips .score { color: var(--accent); flex: none; }
   .mom-group { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); }
   .mom-group input { accent-color: var(--accent); }
+
+  /* Tabs: the wall, and the finder */
+  .tabs {
+    display: flex; gap: 2px; padding: 0 14px;
+    background: var(--panel); border-bottom: 1px solid var(--border);
+  }
+  .tabs button {
+    background: none; border: 0; border-radius: 0; padding: 9px 14px;
+    border-bottom: 2px solid transparent;
+    color: var(--muted); font-weight: 600; font-size: 13px;
+  }
+  .tabs button:hover { background: var(--panel-2); }
+  .tabs button.on { color: var(--text); border-bottom-color: var(--accent); }
+  #grid[hidden], #findView[hidden] { display: none; }
+
+  /* Find */
+  #findView {
+    flex: 1; min-height: 0; overflow-y: auto;
+    padding: 14px; display: flex; flex-direction: column; gap: 12px;
+  }
+  .find-bar { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .find-bar input[type="text"] { flex: 1 1 340px; min-width: 220px; }
+  .find-chips { display: flex; gap: 6px; align-items: center; }
+  .chip {
+    font-size: 12px; padding: 7px 13px; border-radius: 999px;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .chip.on { border-color: var(--accent); color: var(--accent-hover); }
+  .chip input { accent-color: var(--accent); width: 14px; height: 14px; }
+  .find-status {
+    display: flex; gap: 12px; align-items: center;
+    color: var(--muted); font-size: 12px; min-height: 18px;
+  }
+  .find-status b { color: var(--text); font-weight: 600; }
+  .find-status .bar {
+    flex: 0 1 220px; height: 4px; border-radius: 3px;
+    background: var(--panel-2); overflow: hidden;
+  }
+  .find-status .bar i {
+    display: block; height: 100%; width: 0;
+    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    transition: width .3s;
+  }
+  .find-grid {
+    display: grid; align-content: start; gap: 10px;
+    grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  }
+  .find-grid[data-filter="video"] .find-card[data-kind="photo"],
+  .find-grid[data-filter="photo"] .find-card[data-kind="video"],
+  .find-grid[data-named="1"] .find-card:not([data-hit="1"]) { display: none; }
+  .find-card {
+    display: block; text-decoration: none; color: var(--text);
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; overflow: hidden;
+    transition: border-color .15s, transform .05s;
+  }
+  .find-card:hover { border-color: var(--accent); transform: translateY(-1px); }
+  .find-card .shot { position: relative; aspect-ratio: 16 / 9; background: #000; }
+  .find-card img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .find-card .tag {
+    position: absolute; bottom: 6px; right: 6px;
+    background: rgba(0, 0, 0, .78); color: #fff;
+    font-size: 11px; padding: 2px 6px; border-radius: 5px;
+    font-variant-numeric: tabular-nums;
+  }
+  .find-card .tag.photo { left: 6px; right: auto; background: rgba(143, 107, 255, .85); }
+  .find-card .meta { padding: 8px 9px 9px; }
+  .find-card .t {
+    font-size: 12.5px; line-height: 1.35; max-height: 2.7em; overflow: hidden;
+  }
+  .find-card .s { color: var(--muted); font-size: 11px; margin-top: 5px; }
+  .find-hint {
+    color: var(--muted); text-align: center; line-height: 1.6;
+    padding: 40px 20px; max-width: 560px; margin: 0 auto;
+  }
+  .find-hint strong { color: var(--text); font-size: 17px; display: block; margin-bottom: 6px; }
 </style>
 </head>
 <body>
@@ -756,6 +862,7 @@
       <button id="shuffleBtn" title="Randomly rearrange the screens">🔀 Shuffle</button>
       <button id="muteAllBtn" title="Mute/unmute all players">🔇 Muted</button>
       <button id="fsAllBtn" title="Fullscreen with all videos">⛶ Fullscreen</button>
+      <button id="castBtn" title="Mirror this wall to your TV over the LAN — picture only, the sound stays in your headphones">📡 Cast</button>
       <span class="sep"></span>
       <button id="saveBtn" title="Download the current setup as a .json file">💾 Save</button>
       <button id="packBtn" title="Download setup + the videos themselves as one .zip — reload later with zero re-downloading">📦 Pack</button>
@@ -771,6 +878,11 @@
     </div>
   </header>
 
+  <nav class="tabs">
+    <button type="button" id="tabWall" class="on">▦ Wall</button>
+    <button type="button" id="tabFind">🔎 Find</button>
+  </nav>
+
   <div id="grid">
     <div class="empty" id="emptyState">
       <strong>Your video wall is empty</strong>
@@ -782,6 +894,32 @@
         Got a <code>blob:</code> address? It isn't a link — paste it followed by the
         page's own URL, on the same line, and the player gets tracked down.
       </small>
+    </div>
+  </div>
+
+  <div id="findView" hidden>
+    <form class="find-bar" id="findForm">
+      <input type="text" id="findInput" autocomplete="off"
+             placeholder="Type a performer's name — photos and video thumbnails from across the web…">
+      <button type="submit" class="primary">Search</button>
+      <button type="button" id="findFresh" title="Search again ignoring everything cached on the server">↻ Fresh</button>
+      <span class="sep"></span>
+      <div class="find-chips">
+        <button type="button" class="chip on" data-kind="all">All</button>
+        <button type="button" class="chip" data-kind="video">🎬 Videos</button>
+        <button type="button" class="chip" data-kind="photo">🖼 Photos</button>
+        <label class="chip" title="Only cards whose title or link carries the name you searched for">
+          <input type="checkbox" id="findNamed"> Name match
+        </label>
+      </div>
+    </form>
+    <div class="find-status" id="findStatus"></div>
+    <div class="find-grid" id="findGrid" data-filter="all"></div>
+    <div class="find-hint" id="findHint">
+      <strong>An aggregator, not a wall</strong>
+      Type a name and the server searches the web, opens every page it finds and
+      keeps the thumbnails: videos and photo galleries from whichever sites have
+      them. Nothing is downloaded — a card opens the site it came from in a new tab.
     </div>
   </div>
 
@@ -915,8 +1053,15 @@
           <select id="tranceVoice"></select>
         </label>
         <label class="field">
-          <span>A phrase every (s)</span>
-          <input type="number" id="tranceInterval" min="5" max="300" step="1" value="20">
+          <span>Pacing</span>
+          <select id="tranceFlow">
+            <option value="paced">A phrase, then a pause</option>
+            <option value="continuous">Continuous — one flowing text</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Gap between phrases (s)</span>
+          <input type="number" id="tranceInterval" min="0.1" max="300" step="0.1" value="20">
         </label>
         <label class="field">
           <span>Order</span>
@@ -1058,6 +1203,13 @@
 
       <div class="ch-row">
         <select id="chPreset" title="Which scene type to look for."></select>
+        <select id="chGate" title="How sure the match has to be before a clip is kept. Higher means fewer clips and less unrelated footage in them; lower catches more videos and lets weaker matches through.">
+          <option value="">confidence: preset</option>
+          <option value="0.35">35% · catch more</option>
+          <option value="0.5">50%</option>
+          <option value="0.6">60% · stricter</option>
+          <option value="0.7">70% · only sure things</option>
+        </select>
         <select id="chRes" title="Resolution of the exported .mp4.">
           <option value="480" selected>480p</option>
           <option value="720">720p</option>
@@ -1076,6 +1228,50 @@
       <div class="modal-actions">
         <button type="button" id="chClose">Close</button>
         <button type="button" id="chGo" class="primary">⚡ Build the compilation</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: cast -->
+  <div class="modal-backdrop" id="castModal">
+    <div class="modal wide">
+      <h3>📡 Cast the wall to the TV</h3>
+      <div class="modal-sub">
+        The screen goes to the TV as one video stream with no audio track at all — the sound keeps
+        playing here, in your headphones. Nothing is installed on the TV. It only ever goes to the
+        one TV paired below: its UUID and MAC are checked again before every start, and the stream
+        is served to that TV's address alone.
+      </div>
+
+      <div class="cast-card">
+        <div class="who">
+          <div class="cast-name" id="castName">No TV paired</div>
+          <div class="hint" id="castIdent"></div>
+        </div>
+        <div class="cast-state" id="castState">off</div>
+      </div>
+
+      <div class="cast-status hint" id="castStatus" hidden></div>
+
+      <div class="cast-tools">
+        <input type="checkbox" id="castClock">
+        <label for="castClock" title="Shows the time to the millisecond on the wall — compare the PC with the TV to read the real delay">🕒 Clock in the corner (to measure the delay)</label>
+      </div>
+
+      <details class="cast-pair">
+        <summary>Pair a TV…</summary>
+        <div class="hint">Only a TV that is on and on this network right now can be paired. Once one is paired, every other renderer is blocked until you forget it.</div>
+        <ul class="cast-devices" id="castDevices"></ul>
+        <div class="modal-actions" style="justify-content:flex-start">
+          <button type="button" id="castRescan">↻ Scan again</button>
+          <button type="button" id="castUnpair">Forget the paired TV</button>
+        </div>
+      </details>
+
+      <div class="modal-actions">
+        <button type="button" id="castClose">Close</button>
+        <button type="button" id="castStop" disabled>■ Stop</button>
+        <button type="button" id="castStart" class="primary" disabled>▶ Start casting</button>
       </div>
     </div>
   </div>
@@ -1147,8 +1343,9 @@
           <select id="momSure" title="How sure CLIP has to be before a second is worth cutting. The score is the share of the match against the phrases that describe the scene, the ones that get mistaken for it, and the ordinary background — so it is a real threshold, not a ranking.">
             <option value="0.15">15% · loose</option>
             <option value="0.25">25% · loose</option>
-            <option value="0.35" selected>35% · preset default</option>
+            <option value="0.35">35% · normal</option>
             <option value="0.5">50% · strict</option>
+            <option value="0.6">60% · preset default</option>
             <option value="0.7">70% · only sure things</option>
           </select>
         </div>
@@ -1273,6 +1470,7 @@
   const tranceVoice = document.getElementById("tranceVoice");
   const tranceVoiceHint = document.getElementById("tranceVoiceHint");
   const tranceInterval = document.getElementById("tranceInterval");
+  const tranceFlow = document.getElementById("tranceFlow");
   const tranceOrder = document.getElementById("tranceOrder");
   const tranceBedVol = document.getElementById("tranceBedVol");
   const tranceVoiceVol = document.getElementById("tranceVoiceVol");
@@ -3869,7 +4067,8 @@
     beat: 6,
     tone: "binaural",
     noise: "pink",
-    intervalSec: 20,
+    intervalSec: 20,   // gap between phrases, in seconds (fractions allowed)
+    flow: "paced",     // "paced" = a pause between phrases, "continuous" = one text
     order: "sequential",
     bedVolume: 0.35,
     voiceVolume: 1,
@@ -4475,16 +4674,28 @@
     return t;
   }
 
+  function continuousFlow() { return trance.flow === "continuous"; }
+
+  // The gap the user asked for, in ms. Floored at 100 ms so a stray 0 can't
+  // turn the loop into a busy wait, and fractions are honoured — "continuous"
+  // lives at 0.3-0.5 s, which is the pause a person leaves between sentences.
+  function gapMs() {
+    const g = parseFloat(trance.intervalSec);
+    return Math.max(100, (isFinite(g) ? g : 20) * 1000);
+  }
+
   function scheduleNextPhrase(delayMs) {
     clearTimeout(phraseTimer);
     phraseTimer = setTimeout(() => {
       if (!tranceOn) return;
       const text = nextPhrase();
-      if (!text) { scheduleNextPhrase(trance.intervalSec * 1000); return; }
+      if (!text) { scheduleNextPhrase(gapMs()); return; }
       duckVideos(true);
       speakPhrase(text, () => {
-        duckVideos(false);
-        if (tranceOn) scheduleNextPhrase(trance.intervalSec * 1000);
+        // Under a sub-second gap the videos would spend the whole session
+        // ramping up and back down, so continuous holds the duck instead.
+        if (!continuousFlow()) duckVideos(false);
+        if (tranceOn) scheduleNextPhrase(gapMs());
       });
     }, delayMs);
   }
@@ -4498,8 +4709,9 @@
     tranceToggle.checked = true;
     phraseIdx = 0;
     warmPhrases();
-    // Settle into the bed before the first phrase lands.
-    scheduleNextPhrase(Math.max(8000, trance.intervalSec * 1000));
+    // Settle into the bed before the first phrase lands — one gap's worth,
+    // never more: the wait is the setting, not a fixed eight seconds.
+    scheduleNextPhrase(gapMs());
     toast(trance.tone === "isochronic"
       ? "🌀 Trance on."
       : "🌀 Trance on — use headphones, a binaural beat needs both ears.", 4200);
@@ -4537,6 +4749,7 @@
     if (!tranceLang.value) { tranceLang.value = "en-US"; trance.lang = "en-US"; }
     tranceGender.value = trance.gender || "female";
     tranceOrder.value = trance.order;
+    tranceFlow.value = continuousFlow() ? "continuous" : "paced";
     tranceInterval.value = String(trance.intervalSec);
     tranceBedVol.value = String(Math.round(trance.bedVolume * 100));
     tranceVoiceVol.value = String(Math.round(trance.voiceVolume * 100));
@@ -4564,7 +4777,9 @@
     trance.engine = tranceEngine.value === "browser" ? "browser" : "neural";
     if (trance.engine === "neural") trance.voiceNeural = tranceVoice.value || "";
     else trance.voice = tranceVoice.value || "";
-    trance.intervalSec = Math.min(300, Math.max(5, parseInt(tranceInterval.value, 10) || 20));
+    trance.flow = tranceFlow.value === "continuous" ? "continuous" : "paced";
+    const gap = parseFloat(tranceInterval.value);
+    trance.intervalSec = Math.min(300, Math.max(0.1, isFinite(gap) ? gap : 20));
     trance.bedVolume = (parseInt(tranceBedVol.value, 10) || 0) / 100;
     trance.voiceVolume = (parseInt(tranceVoiceVol.value, 10) || 0) / 100;
     trance.rate = (parseInt(tranceRate.value, 10) || 75) / 100;
@@ -4623,6 +4838,17 @@
     trance.gender = tranceGender.value || "female";
     trance.voice = ""; trance.voiceNeural = "";
     refreshVoices();
+  });
+
+  // Each mode has its own natural gap, so switching brings one along instead
+  // of leaving "continuous" sitting on a 20 s pause.
+  tranceFlow.addEventListener("change", () => {
+    const cur = parseFloat(tranceInterval.value);
+    if (tranceFlow.value === "continuous" && (!isFinite(cur) || cur > 3)) {
+      tranceInterval.value = "0.4";
+    } else if (tranceFlow.value === "paced" && (!isFinite(cur) || cur < 3)) {
+      tranceInterval.value = "20";
+    }
   });
 
   tranceEngine.addEventListener("change", () => {
@@ -4995,6 +5221,7 @@
   const chLimit = document.getElementById("chLimit");
   const chPreset = document.getElementById("chPreset");
   const chRes = document.getElementById("chRes");
+  const chGate = document.getElementById("chGate");
   const chNote = document.getElementById("chNote");
   const chProgress = document.getElementById("chProgress");
   const chFill = document.getElementById("chFill");
@@ -5073,6 +5300,7 @@
       body: JSON.stringify({
         url: url, limit: Number(chLimit.value) || 25,
         preset: chPreset.value, resolution: chRes.value,
+        gate: chGate.value || null,
       }),
     })
       .then(r => r.json())
@@ -5440,7 +5668,8 @@
       // far the cut reaches — tying the two together used to chop the run-up off
       // the front of a clip (measured: 35 s late on a moment that starts at
       // 17:00; with this, it opens 54 s early instead).
-      const floor = Math.max(bv * 0.5, 0.05);
+      const cfgGrow = (momPresetCfg() || {}).grow || 0.5;
+      const floor = Math.max(bv * cfgGrow, 0.05);
       let a = bi, b = bi;
       while (a > 0 && !used[a - 1] && s[a - 1] >= floor && (b - a + 1) < max) a--;
       while (b < n - 1 && !used[b + 1] && s[b + 1] >= floor && (b - a + 1) < max) b++;
@@ -6595,6 +6824,197 @@
     }, 600);
   });
 
+  /* ---------- Find: a name in, the web's thumbnails out ----------
+
+     The server does the searching and the scraping; this side does two things.
+     It polls, because results arrive for fifteen seconds and a grid that fills
+     as they land beats one that appears at the end. And it drops any card
+     whose picture never loads — a thumbnail that 403s is a dead card, and it
+     is cheaper to let the browser tell us than to check every URL up front. */
+
+  const tabWall = document.getElementById("tabWall");
+  const tabFind = document.getElementById("tabFind");
+  const findView = document.getElementById("findView");
+  const findForm = document.getElementById("findForm");
+  const findInput = document.getElementById("findInput");
+  const findFresh = document.getElementById("findFresh");
+  const findNamed = document.getElementById("findNamed");
+  const findStatus = document.getElementById("findStatus");
+  const findGrid = document.getElementById("findGrid");
+  const findHint = document.getElementById("findHint");
+
+  const FIND_POLL_MS = 900;
+  let findTimer = null, findJob = null, findSince = 0, findShown = 0;
+
+  function showTab(which) {
+    const onFind = which === "find";
+    tabFind.classList.toggle("on", onFind);
+    tabWall.classList.toggle("on", !onFind);
+    findView.hidden = !onFind;
+    grid.hidden = onFind;
+    if (onFind) findInput.focus();
+  }
+  tabWall.addEventListener("click", () => showTab("wall"));
+  tabFind.addEventListener("click", () => showTab("find"));
+
+  function findSay(text, pct) {
+    findStatus.innerHTML = "";
+    if (!text) return;
+    const label = document.createElement("span");
+    label.innerHTML = text;
+    findStatus.appendChild(label);
+    if (pct != null) {
+      const bar = document.createElement("span");
+      bar.className = "bar";
+      const fill = document.createElement("i");
+      fill.style.width = Math.round(pct * 100) + "%";
+      bar.appendChild(fill);
+      findStatus.appendChild(bar);
+    }
+  }
+
+  function findCard(item) {
+    const a = document.createElement("a");
+    a.className = "find-card";
+    a.href = item.url;
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+    a.title = item.title + "\n" + item.url;
+    a.dataset.kind = item.kind;
+    a.dataset.hit = item.score > 0 ? "1" : "0";
+
+    const shot = document.createElement("div");
+    shot.className = "shot";
+    const img = document.createElement("img");
+    img.loading = "lazy";
+    img.alt = "";
+    img.src = item.thumb;
+    // A thumbnail that refuses to load leaves a black hole in the grid, and on
+    // these sites it happens often enough to matter: drop the whole card.
+    img.addEventListener("error", () => {
+      if (a.parentNode) { a.remove(); findShown--; }
+    });
+    shot.appendChild(img);
+    if (item.dur || item.kind === "photo") {
+      const tag = document.createElement("span");
+      tag.className = "tag" + (item.kind === "photo" ? " photo" : "");
+      tag.textContent = item.dur || "photos";
+      shot.appendChild(tag);
+    }
+    a.appendChild(shot);
+
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    const t = document.createElement("div");
+    t.className = "t";
+    t.textContent = item.title;
+    const s = document.createElement("div");
+    s.className = "s";
+    s.textContent = item.site.replace(/^www\./, "");
+    meta.appendChild(t);
+    meta.appendChild(s);
+    a.appendChild(meta);
+    return a;
+  }
+
+  function findAppend(items) {
+    if (!items.length) return;
+    const frag = document.createDocumentFragment();
+    items.forEach(it => frag.appendChild(findCard(it)));
+    findGrid.appendChild(frag);
+    findShown += items.length;
+    findHint.hidden = true;
+  }
+
+  function findStop() {
+    clearTimeout(findTimer);
+    findTimer = null;
+    findJob = null;
+  }
+
+  async function findPoll() {
+    const job = findJob;
+    if (!job) return;
+    let data = null;
+    try {
+      const r = await fetch("/api/find/status?id=" + encodeURIComponent(job)
+                            + "&since=" + findSince);
+      data = await r.json();
+    } catch (e) {
+      findSay("Lost contact with the server.");
+      return findStop();
+    }
+    if (findJob !== job) return;          // a newer search started meanwhile
+    if (!data.ok) {
+      findSay(data.error || "That search expired.");
+      return findStop();
+    }
+    findSince = data.next;
+    findAppend(data.items || []);
+
+    if (data.stage === "searching") {
+      findSay("Searching the web for <b>" + data.name + "</b>\u2026");
+    } else if (data.stage === "mining") {
+      findSay("<b>" + findShown + "</b> results \u00b7 reading page "
+              + data.done + " of " + data.total,
+              data.total ? data.done / data.total : 0);
+    } else if (data.stage === "error") {
+      findSay(data.error || "The search failed.");
+      if (!findShown) findHint.hidden = false;
+      return findStop();
+    } else {
+      findSay(findShown
+        ? "<b>" + findShown + "</b> results for <b>" + data.name
+          + "</b> \u00b7 from " + data.done + " pages"
+        : "Nothing found for <b>" + data.name + "</b> \u2014 try the name "
+          + "spelled the way the sites spell it.");
+      if (!findShown) findHint.hidden = false;
+      return findStop();
+    }
+    findTimer = setTimeout(findPoll, FIND_POLL_MS);
+  }
+
+  async function findStart(fresh) {
+    const name = findInput.value.trim();
+    if (name.length < 2) { findInput.focus(); return; }
+    findStop();
+    findGrid.innerHTML = "";
+    findSince = 0;
+    findShown = 0;
+    findHint.hidden = true;
+    findSay("Searching the web for <b>" + name + "</b>\u2026");
+    let data = null;
+    try {
+      const r = await fetch("/api/find", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: name, fresh: !!fresh }),
+      });
+      data = await r.json();
+    } catch (e) {
+      return findSay("Couldn't reach the server.");
+    }
+    if (!data || !data.ok) {
+      findHint.hidden = false;
+      return findSay((data && data.error) || "The search didn't start.");
+    }
+    findJob = data.job_id;
+    findTimer = setTimeout(findPoll, 400);
+  }
+
+  findForm.addEventListener("submit", (e) => { e.preventDefault(); findStart(false); });
+  findFresh.addEventListener("click", () => findStart(true));
+  findNamed.addEventListener("change", () => {
+    findGrid.dataset.named = findNamed.checked ? "1" : "0";
+  });
+  findForm.querySelectorAll(".chip[data-kind]").forEach(chip => {
+    chip.addEventListener("click", () => {
+      findForm.querySelectorAll(".chip[data-kind]").forEach(
+        c => c.classList.toggle("on", c === chip));
+      findGrid.dataset.filter = chip.dataset.kind;
+    });
+  });
+
   // #add=<encoded JSON array> is how the extension icon delivers tab URLs —
   // on first load, and via hashchange when the app is already open (a
   // hash-only change doesn't reload the page, so playing videos survive).
@@ -6612,6 +7032,223 @@
   // Supports ?add=url1,url2 in the page URL (to bookmark setups)
   const startUrls = new URLSearchParams(location.search).get("add");
   if (startUrls) startUrls.split(",").forEach(u => addPlayer(u));
+
+  /* ---------- Cast: the wall on the TV, the sound in the headphones ----------
+
+     The screen goes to the paired TV as one video-only stream (ffmpeg + DLNA,
+     all server-side); nothing about audio changes here. This side pairs,
+     starts, stops, and shows what the TV itself reports. Fullscreen is asked
+     for BEFORE the start request goes out: the click is the gesture the
+     browser needs, and the start (SSDP + encoder warm-up) takes longer than
+     that permission lasts. */
+  const castBtn = document.getElementById("castBtn");
+  const castModal = document.getElementById("castModal");
+  const castName = document.getElementById("castName");
+  const castIdent = document.getElementById("castIdent");
+  const castState = document.getElementById("castState");
+  const castStatus = document.getElementById("castStatus");
+  const castDevices = document.getElementById("castDevices");
+  const castRescan = document.getElementById("castRescan");
+  const castUnpair = document.getElementById("castUnpair");
+  const castClose = document.getElementById("castClose");
+  const castStart = document.getElementById("castStart");
+  const castStop = document.getElementById("castStop");
+  const castClock = document.getElementById("castClock");
+  const castClockEl = document.createElement("div");
+  castClockEl.id = "castClockEl";
+  grid.appendChild(castClockEl);
+  let castLast = null;
+  let castClockTimer = null;
+
+  function castPost(path, body) {
+    return apiJson(path, { method: "POST", headers: { "Content-Type": "application/json" },
+                           body: JSON.stringify(body || {}) });
+  }
+
+  function castShortUuid(u) { return (u || "").replace(/^uuid:/, "").slice(0, 8) + "\u2026"; }
+
+  function castRender(s) {
+    const before = castLast ? castLast.state : null;
+    castLast = s;
+    const p = s.paired;
+    const st = s.state;
+    castName.textContent = p ? p.name + " \u00b7 " + p.model : "No TV paired";
+    castIdent.textContent = p
+      ? "UUID " + castShortUuid(p.uuid) + " \u00b7 MAC " + p.mac + " \u00b7 last seen at " + p.ip
+      : "Open \u201cPair a TV\u201d below and pick yours. It is a one-time step.";
+    castState.textContent = st === "casting" ? "\u25cf LIVE" : st === "starting" ? "starting\u2026"
+                          : st === "error" ? "stopped" : "off";
+    castState.className = "cast-state" + (st === "casting" ? " on" : st === "error" ? " err" : "");
+
+    const parts = [];
+    if (st === "casting") {
+      const tv = s.tv || {};
+      parts.push("TV says: " + (tv.state || "\u2026") + (tv.position ? " at " + tv.position : ""));
+      if (s.fps) parts.push(Math.round(s.fps) + " fps");
+      if (s.encoder) parts.push(s.encoder + (s.capture ? " / " + s.capture : ""));
+      if (s.served) parts.push(s.served + " segments sent");
+      if (!s.reached && s.uptime > 3) parts.push("waiting for the TV to fetch\u2026");
+      if (s.restarts) parts.push("encoder restarts: " + s.restarts);
+      if (s.repushes) parts.push("re-pushed: " + s.repushes);
+    } else if (st === "starting") {
+      parts.push("Checking the TV's identity, starting the encoder, handing the stream over\u2026");
+    }
+    let line = parts.join(" \u00b7 ");
+    if (s.warning) line += (line ? "\n" : "") + "\u26a0 " + s.warning;
+    if (s.error) line += (line ? "\n" : "") + "\u2716 " + s.error;
+    castStatus.textContent = line;
+    castStatus.hidden = !line;
+
+    const busy = st === "casting" || st === "starting";
+    castStart.disabled = !p || busy;
+    castStop.disabled = !busy;
+    castUnpair.disabled = !p || busy;
+    castBtn.textContent = st === "casting" ? "\ud83d\udce1 Casting" : "\ud83d\udce1 Cast";
+    castBtn.classList.toggle("live", st === "casting");
+    // The wall may be fullscreen with the modal out of sight: say it out loud.
+    if (before === "casting" && st === "error") toast("Cast stopped: " + (s.error || "unknown reason"), 7000);
+  }
+
+  async function castRefresh() {
+    try { castRender(await apiJson("/api/cast/status")); }
+    catch (e) { castStatus.hidden = false; castStatus.textContent = "\u2716 " + e.message; }
+  }
+
+  function castDevItem(text) {
+    const li = document.createElement("li");
+    li.className = "hint";
+    li.textContent = text;
+    castDevices.appendChild(li);
+  }
+
+  async function castScan() {
+    castDevices.innerHTML = "";
+    castDevItem("Searching the network (3 s)\u2026");
+    let r;
+    try { r = await apiJson("/api/cast/devices"); }
+    catch (e) { castDevices.innerHTML = ""; castDevItem("\u2716 " + e.message); return; }
+    castDevices.innerHTML = "";
+    if (!r.devices.length) { castDevItem("No DLNA renderer answered. Is the TV on, and on this network?"); return; }
+    r.devices.forEach(d => {
+      const li = document.createElement("li");
+      const who = document.createElement("div");
+      who.className = "who";
+      const nm = document.createElement("div");
+      nm.textContent = d.name + " \u00b7 " + d.model;
+      const id = document.createElement("div");
+      id.className = "ident";
+      id.textContent = d.ip + " \u00b7 " + (d.mac || "MAC unknown") + " \u00b7 " + castShortUuid(d.uuid);
+      who.appendChild(nm);
+      who.appendChild(id);
+      li.appendChild(who);
+      if (d.paired) {
+        const tag = document.createElement("span");
+        tag.className = "cast-tag" + (d.verdict ? " warn" : "");
+        tag.textContent = d.verdict ? "paired \u00b7 " + d.verdict : "paired \u2713";
+        li.appendChild(tag);
+      } else if (r.paired) {
+        li.classList.add("blocked");
+        const tag = document.createElement("span");
+        tag.className = "cast-tag";
+        tag.textContent = "blocked";
+        li.appendChild(tag);
+      } else {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.textContent = "Pair this TV";
+        b.addEventListener("click", () => castPair(d));
+        li.appendChild(b);
+      }
+      castDevices.appendChild(li);
+    });
+  }
+
+  async function castPair(d) {
+    const ok = confirm("Pair \"" + d.name + "\" (" + d.model + ", " + (d.mac || "MAC unknown") + ")?\n\n" +
+                       "This becomes the ONLY screen the cast will ever go to. " +
+                       "Its UUID and MAC are checked again before every start.");
+    if (!ok) return;
+    try {
+      const r = await castPost("/api/cast/pair", { uuid: d.uuid });
+      if (r.ok === false) { toast("Pair: " + r.error, 6000); return; }
+      toast("Paired with " + r.paired.name + ".", 3200);
+    } catch (e) { toast("Pair: " + e.message, 6000); }
+    castRefresh();
+    castScan();
+  }
+
+  async function castDoUnpair() {
+    if (!castLast || !castLast.paired) return;
+    if (!confirm("Forget " + castLast.paired.name + "? You will have to pair a TV again before casting.")) return;
+    try {
+      const r = await castPost("/api/cast/unpair");
+      if (r.ok === false) { toast(r.error, 5000); return; }
+    } catch (e) { toast(e.message, 6000); }
+    castRefresh();
+    castScan();
+  }
+
+  async function castDoStart() {
+    castStart.disabled = true;
+    const wentFull = !document.fullscreenElement && !!grid.requestFullscreen;
+    if (wentFull) grid.requestFullscreen().catch(() => {});
+    castModal.classList.remove("open");
+    let s;
+    try {
+      s = await castPost("/api/cast/start");
+    } catch (e) {
+      s = { ok: false, error: e.message, state: "error", paired: castLast && castLast.paired };
+    }
+    castRender(s);
+    if (s.ok === false || s.state !== "casting") {
+      if (wentFull && document.fullscreenElement) document.exitFullscreen().catch(() => {});
+      castModal.classList.add("open");
+      toast("Cast: " + (s.error || "did not start"), 7000);
+      return;
+    }
+    toast("Casting to " + s.device.name + " \u2014 the sound stays here.", 4000);
+  }
+
+  async function castDoStop() {
+    castStop.disabled = true;
+    try { castRender(await castPost("/api/cast/stop")); }
+    catch (e) { toast("Stop: " + e.message, 6000); }
+  }
+
+  function openCastModal() { castModal.classList.add("open"); castRefresh(); castScan(); }
+  function closeCastModal() { castModal.classList.remove("open"); }
+
+  castBtn.addEventListener("click", openCastModal);
+  castClose.addEventListener("click", closeCastModal);
+  castModal.addEventListener("click", (e) => { if (e.target === castModal) closeCastModal(); });
+  castStart.addEventListener("click", castDoStart);
+  castStop.addEventListener("click", castDoStop);
+  castRescan.addEventListener("click", castScan);
+  castUnpair.addEventListener("click", castDoUnpair);
+
+  castClock.addEventListener("change", () => {
+    castClockEl.classList.toggle("show", castClock.checked);
+    if (castClock.checked && !castClockTimer) {
+      castClockTimer = setInterval(() => {
+        const d = new Date();
+        const p = (n, w) => String(n).padStart(w || 2, "0");
+        castClockEl.textContent = p(d.getHours()) + ":" + p(d.getMinutes()) + ":" +
+                                  p(d.getSeconds()) + "." + p(d.getMilliseconds(), 3);
+      }, 47);
+    } else if (!castClock.checked && castClockTimer) {
+      clearInterval(castClockTimer);
+      castClockTimer = null;
+    }
+  });
+
+  // Keep the button honest while the modal is closed: the server may be
+  // casting from an earlier page load, or the TV may have stopped.
+  setInterval(() => {
+    const open = castModal.classList.contains("open");
+    const live = castLast && (castLast.state === "casting" || castLast.state === "starting");
+    if (open || live) castRefresh();
+  }, 4000);
+  apiJson("/api/cast/status").then(castRender).catch(() => {});  // an older server has no /api/cast: stay quiet
 
   loadShrinkPrefs();
   urlInput.focus();

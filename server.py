@@ -1851,7 +1851,12 @@ ANALYZE_JOB_TTL = 1800
 # Everything measured about a video — curves here, CLIP vectors later — is
 # expensive to produce and tiny to keep, so it lives in a real cache directory
 # instead of TEMP, where a cleanup would throw it away.
-MS_CACHE_HOME = os.path.join(os.path.expanduser("~"), ".cache", "multiscreen")
+# Where the measured curves, the CLIP models and the indexes live. Normally in
+# the user's own profile, but a second account on the same machine should point
+# at the first one's copy instead of fetching another 2.8 GB of identical
+# models: set MULTISCREEN_CACHE and both share one.
+MS_CACHE_HOME = (os.environ.get("MULTISCREEN_CACHE")
+                 or os.path.join(os.path.expanduser("~"), ".cache", "multiscreen"))
 ANALYZE_CACHE_DIR = os.path.join(MS_CACHE_HOME, "curves")
 ANALYZE_CACHE_TTL = 14 * 86400
 # Below this a scene score is camera shake or a flash, not a cut.
@@ -2232,9 +2237,11 @@ CLIP_BACKGROUND = (
     "static noise",
 )
 
-# CLIP looks at 224 px. Downloading a 1080p copy to throw away 96% of every
-# pixel is pure cost, and the small rendition also arrives far faster.
-CLIP_INDEX_QUALITY = 480
+# CLIP looks at 224 px, and the frame is letterboxed into that square before
+# the encoder sees it. A 360p rendition already has more height than that, so
+# anything larger is bytes downloaded to be thrown away — and downloading is
+# most of the wait on a long page.
+CLIP_INDEX_QUALITY = 360
 
 # Reading a signed CDN stream straight into ffmpeg is what kept ending an index
 # at 0:51 of 14:03: the socket dies, ffmpeg stops, and the frames that did
@@ -2298,12 +2305,19 @@ CLIP_PRESETS = {
         # right out of four to three, and made the two videos that must stay
         # quiet quieter (0.34 -> 0.21).
         "prefer": "last",
-        # Measured on six videos with known answers: the two that must stay
-        # quiet peak at 0.04 and 0.21, the three found ones at 0.41, 0.72 and
-        # 0.78, and the one this model cannot see at 0.33. Anything from 0.25
-        # to 0.40 scores the same, and 0.35 is the value that turns that last
-        # one into an honest silence instead of a wrong clip in the export.
-        "gate": 0.35,
+        # Raised from 0.35 on the evidence of a real sixty-video run: of the 43
+        # clips it produced, the weakest 22 sat between 0.35 and 0.60 and were
+        # the ones that came back with unrelated footage in them. The cost is
+        # measured and real — on the six videos with known answers, the match
+        # at 0.41 is lost, so recall goes 3/4 -> 2/4. This preset is for a
+        # compilation somebody sells, where a wrong clip costs more than a
+        # missing one; the Confidence control moves it back for other uses.
+        "gate": 0.6,
+        # How far down from its peak a clip may reach. At 0.5 the clips ran 77s
+        # and 63s on the known videos and carried unrelated seconds with them;
+        # at 0.7 the same moments come out at 20s and 30s with the hit rate
+        # untouched (3/4, no false positives).
+        "grow": 0.7,
         # Left on the default encoder deliberately. B/16 sees the one scene
         # B/32 is blind to (0.32 where B/32 reads 0.11), but it also invents one
         # in a video that has no such scene at all, and at 0.56 — higher than
@@ -3034,6 +3048,69 @@ def clip_like(vecs, ref, span=None):
              "median": round(median, 4)})
 
 
+def clip_pick_all(curve, offset=0.0, duration=0.0, gate=0.5, grow=0.7,
+                  min_len=8.0, max_len=96.0, margin=3.0, budget=0.0, gap=3,
+                  limit=200):
+    """Every stretch worth keeping, strongest first.
+
+    `clip_pick_moment` answers "does this video have the thing, and where" — one
+    clip, because an ordinary video has the thing once. A compilation has it
+    twenty times, and re-cutting one is a different question: which minutes are
+    the strongest, and how many fit in the length being aimed at.
+
+    With a `budget` in seconds, the clips are chosen by confidence until the
+    budget is met and then handed back in time order — so a ten minute target
+    keeps the ten best minutes, not the first ten.
+    """
+    if not curve:
+        return []
+    smooth = _smooth(curve)
+    n = len(smooth)
+    used = bytearray(n)
+    found = []
+
+    while len(found) < limit:
+        seed, peak = -1, -1.0
+        for i in range(n):
+            if not used[i] and smooth[i] > peak:
+                seed, peak = i, smooth[i]
+        if seed < 0 or peak < gate:
+            break
+
+        floor = max(peak * grow, 0.05)
+        a = b = seed
+        while a > 0 and not used[a - 1] and smooth[a - 1] >= floor and (b - a + 1) < max_len:
+            a -= 1
+        while b < n - 1 and not used[b + 1] and smooth[b + 1] >= floor and (b - a + 1) < max_len:
+            b += 1
+
+        lo, hi = float(a), float(b + 1)
+        if hi - lo < min_len:
+            lo = max(0.0, lo - (min_len - (hi - lo)) / 2.0)
+            hi = min(float(n), lo + min_len)
+            lo = max(0.0, hi - min_len)
+
+        for i in range(max(0, int(lo) - gap), min(n, int(hi) + gap)):
+            used[i] = 1
+
+        start = max(0.0, offset + lo - margin)
+        end = min(duration or (offset + n), offset + hi + margin)
+        if end > start + 0.5:
+            found.append({"start": round(start, 2), "end": round(end, 2),
+                          "score": round(float(peak), 4), "at": round(offset + seed, 2)})
+
+    found.sort(key=lambda m: -m["score"])
+    if budget:
+        kept, total = [], 0.0
+        for m in found:
+            if total >= budget:
+                break
+            kept.append(m)
+            total += m["end"] - m["start"]
+        found = kept
+    return sorted(found, key=lambda m: m["start"])
+
+
 def clip_classify(vecs, preset, model):
     """Per-second odds that a second is this preset's scene type, in 0..1.
 
@@ -3078,7 +3155,7 @@ def _smooth(curve, radius=2):
 
 
 def clip_pick_moment(curve, offset=0.0, duration=0.0, gate=0.35, prefer="last",
-                     min_len=8.0, max_len=96.0, margin=5.0):
+                     min_len=8.0, max_len=96.0, margin=5.0, grow=0.5):
     """The one clip worth keeping from a scored video, or None.
 
     This is the picking that was calibrated against six videos with known
@@ -3119,7 +3196,10 @@ def clip_pick_moment(curve, offset=0.0, duration=0.0, gate=0.35, prefer="last",
     if peak < gate:
         return None
 
-    floor = max(peak * 0.5, 0.05)
+    # How far down the peak the clip is allowed to reach. Lower keeps the whole
+    # scene and lets unrelated seconds ride along; higher keeps only the part
+    # that clearly is the thing.
+    floor = max(peak * grow, 0.05)
     a = b = seed
     while a > 0 and smooth[a - 1] >= floor and (b - a + 1) < max_len:
         a -= 1
@@ -3270,7 +3350,7 @@ def channel_videos(url, limit=CHANNEL_MAX):
     return {"title": title, "videos": out[:limit]}
 
 
-def _channel_cut_for(video, preset, model, on_progress):
+def _channel_cut_for(video, preset, model, on_progress, gate=None):
     """Index one video and return the clip the preset wants, or None."""
     cfg = CLIP_PRESETS[preset]
     window = tuple(cfg["window"])
@@ -3284,8 +3364,9 @@ def _channel_cut_for(video, preset, model, on_progress):
 
     curve = clip_classify(vecs, preset, model)
     moment = clip_pick_moment(curve, offset=offset, duration=duration,
-                              gate=cfg.get("gate", 0.35),
-                              prefer=cfg.get("prefer", "best"))
+                              gate=gate if gate is not None else cfg.get("gate", 0.35),
+                              prefer=cfg.get("prefer", "best"),
+                              grow=cfg.get("grow", 0.5))
     if not moment:
         return None
 
@@ -3304,7 +3385,7 @@ def _channel_cut_for(video, preset, model, on_progress):
             "score": moment["score"], "at": moment["at"], "local": bool(local)}
 
 
-def _run_channel_job(job_id, url, limit, preset, model, resolution):
+def _run_channel_job(job_id, url, limit, preset, model, resolution, gate=None):
     """List, measure, pick, cut, join — the whole compilation, server side."""
     try:
         span_prune()
@@ -3325,7 +3406,7 @@ def _run_channel_job(job_id, url, limit, preset, model, resolution):
                 _set_channel(job_id, frames=frames)
 
             try:
-                cut = _channel_cut_for(video, preset, model, progress)
+                cut = _channel_cut_for(video, preset, model, progress, gate)
             except Exception as e:  # noqa: BLE001
                 missed.append("%s: %s" % (video["title"][:40],
                                           str(e).splitlines()[-1][:90]))
@@ -3780,6 +3861,1367 @@ def _bigrams(text):
     return out
 
 
+# ---------- /api/find (type a name, get the web's thumbnails) ----------
+
+# Every other feature here starts from a URL you already have. This one starts
+# from a name. A web search picks the pages, and each page is mined for its
+# thumbnail grid — no list of sites, no per-site rules: an <img> inside an <a>
+# is what makes a card, and the link's shape (the same trick Related uses)
+# tells a video from a gallery.
+#
+# Two things keep it from feeling dead while it works: the pages are fetched by
+# a pool and the browser polls for whatever has landed, so the first cards show
+# up in a couple of seconds; and every mined page is written to disk, so the
+# same name searched again paints immediately and costs the sites nothing.
+
+FIND_JOB_TTL = 900             # a finished search stays fetchable this long
+FIND_PAGES = 30                # pages mined per search — each one a round trip
+FIND_WORKERS = 8               # ...this many at a time
+FIND_PER_HOST = 4              # so one big site can't eat the whole budget
+FIND_MAX_ITEMS = 800
+FIND_MAX_CARDS_PER_PAGE = 120
+FIND_CACHE_DIR = os.path.join(MS_CACHE_HOME, "find")
+FIND_CACHE_TTL = 6 * 3600      # mined pages
+FIND_SEARCH_TTL = 3 * 3600     # the search engine's own answer
+FIND_MIN_THUMB = 90            # px: an <img> smaller than this is furniture
+
+# The search engines, in the order they are tried. All three answer a plain
+# GET without an API key, and each one is asked with its own safe-search-off
+# switch — without that a search for a performer comes back empty. They are a
+# chain rather than a choice because the free endpoints rate-limit hard: the
+# first one to actually return results wins, and one that starts refusing is
+# skipped for a while (see `_search_cooldown`).
+_SEARCH_ENGINES = (
+    ("duckduckgo", "https://html.duckduckgo.com/html/?q={q}&kp=-2&kl=us-en"),
+    ("brave", "https://search.brave.com/search?q={q}&safesearch=off"),
+    ("searxng", "https://searxng.site/search?q={q}&safesearch=0"),
+)
+SEARCH_COOLDOWN = 600          # an engine that refuses is left alone this long
+_search_cooldown = {}          # engine name -> time it may be asked again
+_search_cooldown_lock = threading.Lock()
+
+# Hosts that are never a thumbnail grid: other search engines, the encyclopedia
+# entry, and the social sites whose grids are built by JavaScript we can't run.
+_FIND_SKIP_HOSTS = (
+    "duckduckgo.com", "google.", "bing.com", "yandex.", "baidu.com",
+    "yahoo.com", "ecosia.org", "startpage.com", "brave.com",
+    "wikipedia.org", "wikidata.org", "imdb.com", "fandom.com",
+    "twitter.com", "x.com", "facebook.com", "instagram.com", "tiktok.com",
+    "pinterest.", "reddit.com", "t.me", "onlyfans.com", "linktr.ee",
+    "youtube.com", "youtu.be", "dailymotion.com", "vimeo.com",
+    "amazon.", "ebay.", "aliexpress.",
+)
+
+_IMG_TAG_RE = re.compile(r"<img\b[^>]*>", re.I)
+_META_TAG_RE = re.compile(r"<meta\b[^>]*>", re.I)
+_DURATION_RE = re.compile(r"\b(\d{1,3}:[0-5]\d(?::[0-5]\d)?)\b")
+_DDG_WRAP_RE = re.compile(r"/l/\?(?:.*&)?uddg=([^&\"']+)", re.I)
+
+# What the path says the link is. Checked against the URL and the thumbnail.
+_PHOTO_HINT_RE = re.compile(
+    r"/(gallery|galleries|photo|photos|pic|pics|picture|pictures|album|albums"
+    r"|image|images|gal|set|sets|shoot|shoots|foto|fotos)(?:[/_-]|\d|$)", re.I)
+_VIDEO_HINT_RE = re.compile(
+    r"/(video|videos|watch|movie|movies|scene|scenes|clip|clips|embed|play"
+    r"|player|media|v|vid)(?:[/_-]|\d|$)", re.I)
+# Images that are part of the furniture rather than of the content.
+_JUNK_IMG_RE = re.compile(
+    r"(logo|sprite|avatar|icon|favicon|banner|placeholder|blank|spacer|loading"
+    r"|pixel|1x1|transparent|/ads?/|adserv|smilie|emoji|flag)", re.I)
+
+# Image attributes in the order a lazy-loading grid fills them: the real URL
+# hides in a data- attribute while `src` holds a grey placeholder.
+_IMG_SRC_ATTRS = ("data-original", "data-src", "data-lazy-src", "data-lazy",
+                  "data-thumb", "data-thumb-url", "data-thumb_url",
+                  "data-thumbnail", "data-image", "data-poster", "data-url",
+                  "src")
+
+# Those same attributes also carry the little clip that plays on hover. It is
+# not something an <img> can show, so a candidate ending in one of these is
+# skipped and the next attribute gets its turn.
+_NOT_AN_IMAGE_RE = re.compile(r"\.(mp4|webm|m3u8|ts|mov|mkv)(?:$|[?#])", re.I)
+
+# Script and style hold anchors and text that are not on the page at all —
+# thumbnail templates, tracking snippets — and mining them yields cards whose
+# title is a line of JavaScript.
+_SCRIPT_STYLE_RE = re.compile(r"<(script|style|noscript)\b[^>]*>.*?</\1>",
+                              re.I | re.S)
+
+_find_jobs = {}
+_find_jobs_lock = threading.Lock()
+
+
+def _attr(tag, name):
+    """One attribute out of a raw tag, quoted or not."""
+    import html as _html
+    m = re.search(r"""\b%s\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))"""
+                  % re.escape(name), tag, re.I)
+    if not m:
+        return ""
+    return _html.unescape(m.group(1) or m.group(2) or m.group(3) or "").strip()
+
+
+def _largest_in_srcset(value):
+    """The biggest candidate of a srcset: the one with the widest descriptor,
+    and failing that the last, which is the convention."""
+    best, best_w = "", -1.0
+    for part in (value or "").split(","):
+        bits = part.strip().split()
+        if not bits:
+            continue
+        try:
+            w = float(bits[1].rstrip("wx")) if len(bits) > 1 else 0.0
+        except ValueError:
+            w = 0.0
+        if w >= best_w:
+            best, best_w = bits[0], w
+    return best
+
+
+def _img_thumb(tag, page_url):
+    """The picture an <img> really shows, absolute — or "" when it is
+    furniture, a placeholder, or too small to be a card."""
+    raw = ""
+    for name in _IMG_SRC_ATTRS:
+        v = _attr(tag, name)
+        if (v and len(v) > 8 and not v.lower().startswith("data:")
+                and not _NOT_AN_IMAGE_RE.search(v)):
+            raw = v
+            break
+    if not raw:
+        raw = _largest_in_srcset(_attr(tag, "srcset") or _attr(tag, "data-srcset"))
+    if not raw or raw.lower().startswith(("data:", "javascript:")):
+        return ""
+    for dim in ("width", "height"):
+        try:
+            n = int(re.sub(r"[^0-9]", "", _attr(tag, dim)) or 0)
+        except ValueError:
+            n = 0
+        if 0 < n < FIND_MIN_THUMB:
+            return ""
+    url = urllib.parse.urljoin(page_url, raw).split("#")[0]
+    if not url.lower().startswith(("http://", "https://")):
+        return ""
+    if _JUNK_IMG_RE.search(urllib.parse.urlsplit(url).path):
+        return ""
+    return url
+
+
+def _site_of(url):
+    """The site a URL belongs to: the last two labels of its host, so a link
+    from cdn.example.com to www.example.com still counts as staying home."""
+    try:
+        host = urllib.parse.urlsplit(url).netloc.lower().split(":")[0]
+    except ValueError:
+        return ""
+    parts = [p for p in host.split(".") if p]
+    return ".".join(parts[-2:]) if len(parts) >= 2 else host
+
+
+def _is_index_link(url):
+    """True for a link to a category, tag or profile page rather than to a
+    thing you can watch. Those come with a picture of their own and would
+    otherwise sit in the grid as a card titled "Anal" or "teens".
+
+    The test is deliberately narrow: a short path whose marker sits at the
+    front (/category/anal, /pornstars/riley-reid). A long one that merely
+    passes through the same word (/models/riley/video/123) is a video."""
+    kind, _name = _is_taxonomy_path(url)
+    if not kind:
+        return False
+    try:
+        segs = [x for x in urllib.parse.urlsplit(url).path.split("/") if x]
+    except ValueError:
+        return False
+    return len(segs) <= 3 and not segs[-1].isdigit()
+
+
+def _card_kind(href, thumb, page_kind):
+    """video or photo. The path says it when it can, and anything still
+    unnamed inherits whatever the page it came from is."""
+    try:
+        path = urllib.parse.urlsplit(href).path
+    except ValueError:
+        return page_kind
+    if _PHOTO_HINT_RE.search(path):
+        return "photo"
+    if _VIDEO_HINT_RE.search(path):
+        return "video"
+    if thumb and _PHOTO_HINT_RE.search(urllib.parse.urlsplit(thumb).path):
+        return "photo"
+    return page_kind
+
+
+def _proxied_thumb(url, referer):
+    """Thumbnails are hotlink-protected on most of these sites: requested
+    straight from the page they 403, requested through the proxy with the page
+    they came from as Referer they load."""
+    return "/api/proxy?p=" + encode_target(url, {
+        "User-Agent": DEFAULT_UA,
+        "Referer": referer,
+        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+    })
+
+
+def _og(text, prop):
+    """One OpenGraph value out of a page's head."""
+    for tag in _META_TAG_RE.findall(text[:200000]):
+        if (_attr(tag, "property") or _attr(tag, "name")).lower() == prop:
+            return _attr(tag, "content")
+    return ""
+
+
+_CODE_ISH_RE = re.compile(r"(document\.|function\s*\(|\{|\}|=>|;\s*$|</)")
+
+
+def _best_title(label, url):
+    """The label a card should carry.
+
+    Markup often hands over a badge ("1080p", "HD") or a line of a template
+    instead of a title, while the URL's own slug is the title on most of these
+    sites. So the label has to earn its place: real words, several of them,
+    nothing that looks like code."""
+    label = (label or "").strip()
+    slug = _pretty_slug(url)
+    if label and not _CODE_ISH_RE.search(label):
+        if len(_WORD_RE.findall(label)) >= 3 or len(label) >= len(slug):
+            return label
+    return slug or label
+
+
+def _find_cards(page_url, text):
+    """Every card a page shows: {url, title, thumb, kind, dur}.
+
+    A card is an <a> with an <img> inside it, pointing somewhere on the same
+    site. That one rule covers a tube's video grid, a performer's profile page
+    and a gallery index without knowing which of the three it is looking at —
+    and it leaves out navigation, ads and the sidebar, none of which are a
+    picture linking deeper into the site."""
+    import html as _html
+    text = _SCRIPT_STYLE_RE.sub(" ", text)
+    site = _site_of(page_url)
+    page_kind = "photo" if _PHOTO_HINT_RE.search(
+        urllib.parse.urlsplit(page_url).path) else "video"
+    out, seen = [], set()
+
+    # The page itself is a card when it is one video: a watch page the search
+    # engine returned carries its poster and title in the OpenGraph tags, and
+    # nothing in its own grid points back at it.
+    og_img = "" if _is_index_link(page_url) else _og(text, "og:image")
+    if og_img:
+        own = urllib.parse.urljoin(page_url, og_img)
+        if own.lower().startswith(("http://", "https://")):
+            kind = "video" if (_og(text, "og:type") or "").lower().startswith(
+                "video") else page_kind
+            out.append({"url": page_url, "thumb": own, "kind": kind, "dur": "",
+                        "title": _og(text, "og:title") or _pretty_slug(page_url)})
+            seen.add(_norm_url(page_url))
+
+    for m in _A_TAG_RE.finditer(text):
+        if len(out) >= FIND_MAX_CARDS_PER_PAGE:
+            break
+        attrs, inner = m.group(1), m.group(2)
+        hm = _HREF_RE.search(attrs)
+        if not hm:
+            continue
+        href = (hm.group(1) or hm.group(2) or "").strip()
+        if not href or href[0] in "#?" or href.lower().startswith(
+                ("javascript:", "mailto:", "data:")):
+            continue
+        url = urllib.parse.urljoin(page_url, _html.unescape(href)).split("#")[0]
+        if not url.lower().startswith(("http://", "https://")):
+            continue
+        if _NON_PAGE_RE.search(url) or _site_of(url) != site:
+            continue                    # off-site here means an ad, not a card
+        if _is_index_link(url):
+            continue                    # a category tile is not a card
+        key = _norm_url(url)
+        if key in seen:
+            continue
+        img = _IMG_TAG_RE.search(inner)
+        if not img:
+            continue
+        thumb = _img_thumb(img.group(0), page_url)
+        if not thumb:
+            continue
+        inner_text = re.sub(r"\s+", " ", _html.unescape(
+            _TAG_STRIP_RE.sub(" ", inner))).strip()
+        title = _best_title(
+            (_attr(img.group(0), "alt") or _attr(img.group(0), "title")
+             or _attr(attrs, "title") or _attr(attrs, "aria-label")
+             or inner_text)[:200], url)
+        dm = _DURATION_RE.search(inner_text)
+        seen.add(key)
+        out.append({"url": url, "title": title, "thumb": thumb,
+                    "kind": _card_kind(url, thumb, page_kind),
+                    "dur": dm.group(1) if dm else ""})
+    return out
+
+
+def _find_cache_path(kind, key):
+    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()
+    return os.path.join(FIND_CACHE_DIR, "%s-%s.json" % (kind, digest))
+
+
+def _find_cache_get(kind, key, ttl):
+    path = _find_cache_path(kind, key)
+    try:
+        if time.time() - os.path.getmtime(path) > ttl:
+            return None
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def _find_cache_put(kind, key, data):
+    try:
+        os.makedirs(FIND_CACHE_DIR, exist_ok=True)
+        with open(_find_cache_path(kind, key), "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+# The engine's "we think you are a robot" page: HTTP 202, no results, and a
+# form that wants JavaScript run. Worth recognising, because it arrives looking
+# like a perfectly good response.
+_SEARCH_BLOCKED = "anomaly.js"
+
+
+def _search_fetch(url):
+    """One search request, as a plain GET.
+
+    Impersonation goes FIRST here, which is the opposite of the rule everywhere
+    else in this file: the plain client is recognised by its TLS handshake and
+    handed the robot page every time, while an impersonated Chrome gets the
+    real result list. And it is asked with no headers of ours at all — a
+    hand-written User-Agent next to a Chrome handshake is itself the tell. The
+    plain client still gets its turn afterwards, so a machine without curl_cffi
+    is not left with nothing."""
+    max_bytes = 2 * 1024 * 1024
+
+    def usable(text):
+        return text if text and _SEARCH_BLOCKED not in text else ""
+
+    if _IMPERSONATE is not None:
+        try:
+            from curl_cffi import requests as curl_requests
+            r = curl_requests.get(url, timeout=15, impersonate="chrome")
+            if r.status_code < 400:
+                got = usable(r.content[:max_bytes].decode("utf-8", "replace"))
+                if got:
+                    return got
+        except Exception:  # noqa: BLE001
+            pass
+    headers = {
+        "User-Agent": DEFAULT_UA,
+        "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.8",
+    }
+    if _HAS_REQUESTS:
+        sess = _acquire_session()
+        try:
+            r = sess.get(url, headers=headers, timeout=(5, 12))
+            if r.status_code < 400:
+                got = usable(r.content[:max_bytes].decode("utf-8", "replace"))
+                if got:
+                    return got
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            _release_session(sess)
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            return usable(resp.read(max_bytes).decode("utf-8", "replace"))
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _engine_links(text):
+    """The outside pages a results page points at.
+
+    Deliberately not per-engine markup: every absolute link that is not the
+    engine's own furniture is a candidate, and the junk that gets through is
+    dropped later by the same rules that drop it everywhere else. One engine
+    wraps its results in a redirector (/l/?uddg=<encoded>), so that one form
+    has to be unwrapped to find the real address."""
+    import html as _html
+    links, seen = [], set()
+    for m in _HREF_RE.finditer(text):
+        href = _html.unescape((m.group(1) or m.group(2) or "").strip())
+        wrap = _DDG_WRAP_RE.search(href)
+        if wrap:
+            href = urllib.parse.unquote(wrap.group(1))
+        if href.startswith("//"):
+            href = "https:" + href
+        if not href.lower().startswith(("http://", "https://")):
+            continue
+        host = urllib.parse.urlsplit(href).netloc.lower()
+        if any(s in host for s in _FIND_SKIP_HOSTS) or _NON_PAGE_RE.search(href):
+            continue
+        key = _norm_url(href)
+        if key in seen:
+            continue
+        seen.add(key)
+        links.append(href)
+    return links
+
+
+def _search_links(query, fresh=False):
+    """Page URLs the web offers for `query` — the first engine that answers.
+
+    Three results would be an engine that answered with its own navigation and
+    nothing else, so that counts as a refusal and the next one is tried."""
+    if not fresh:
+        cached = _find_cache_get("q", query, FIND_SEARCH_TTL)
+        if cached is not None:
+            return cached
+
+    now = time.time()
+    for name, template in _SEARCH_ENGINES:
+        with _search_cooldown_lock:
+            if _search_cooldown.get(name, 0) > now:
+                continue
+        links = _engine_links(_search_fetch(
+            template.format(q=urllib.parse.quote(query))))
+        if len(links) > 3:
+            _find_cache_put("q", query, links)
+            return links
+        with _search_cooldown_lock:
+            _search_cooldown[name] = time.time() + SEARCH_COOLDOWN
+        sys.stderr.write("  FIND %s refused the search - trying the next engine\n"
+                         % name)
+    return []
+
+
+def _find_rank_pages(links, words):
+    """Profile and tag pages first: a page filed under the name is a grid of
+    nothing but that person, while a watch page is one card plus whatever the
+    site felt like recommending next to it."""
+    def rank(url):
+        low = urllib.parse.unquote(url).lower()
+        kind, _name = _is_taxonomy_path(url)
+        score = 6 if kind else 0
+        hits = sum(1 for w in words if w in low)
+        score += 3 * hits
+        if words and hits == len(words):
+            score += 4
+        if len([x for x in urllib.parse.urlsplit(url).path.split("/") if x]) <= 1:
+            score -= 2              # a bare home page rarely carries the grid
+        return -score
+    return sorted(links, key=rank)
+
+
+def _find_page_cards(page_url, fresh=False):
+    """The cards of one page, from disk while they are still fresh."""
+    if not fresh:
+        cached = _find_cache_get("p", _norm_url(page_url), FIND_CACHE_TTL)
+        if cached is not None:
+            return cached
+    try:
+        text, _imp = _fetch_page_html(page_url)
+    except Exception:  # noqa: BLE001
+        _find_cache_put("p", _norm_url(page_url), [])  # don't retry it all day
+        return []
+    cards = _find_cards(page_url, text)
+    _find_cache_put("p", _norm_url(page_url), cards)
+    return cards
+
+
+def _set_find(job_id, **fields):
+    with _find_jobs_lock:
+        job = _find_jobs.get(job_id)
+        if job:
+            job.update(fields)
+
+
+def _find_collect(job_id, page_url, cards, words, seen_card):
+    """Turn one page's cards into results the browser can paint, and hand them
+    to the job as soon as they exist — that is what makes the grid fill in
+    while the rest of the pages are still being fetched."""
+    ready = []
+    for c in cards:
+        key = _norm_url(c["url"])
+        if key in seen_card or len(seen_card) >= FIND_MAX_ITEMS:
+            continue
+        seen_card.add(key)
+        low = (c["title"] + " " + urllib.parse.unquote(c["url"])).lower()
+        hits = sum(1 for w in words if w in low)
+        ready.append({
+            "url": c["url"],
+            "title": c["title"],
+            "thumb": _proxied_thumb(c["thumb"], page_url),
+            "kind": c["kind"],
+            "dur": c.get("dur") or "",
+            "site": urllib.parse.urlsplit(c["url"]).netloc.lower(),
+            "via": page_url,
+            "score": hits + (2 if words and hits == len(words) else 0),
+        })
+    # Within one page the cards that actually name the search go first, so the
+    # profile grid leads and whatever the site had in its sidebar follows.
+    ready.sort(key=lambda c: -c["score"])
+    with _find_jobs_lock:
+        job = _find_jobs.get(job_id)
+        if job:
+            job["items"].extend(ready)
+            job["done"] += 1
+            job["found"] = len(job["items"])
+
+
+def _run_find_job(job_id, name, fresh):
+    """Search the web for the name, then mine every page it returned."""
+    words = {w for w in _WORD_RE.findall(name.lower()) if len(w) > 1}
+    try:
+        _set_find(job_id, stage="searching")
+        links, seen_link = [], set()
+        for query in (name, '"%s" videos' % name, '"%s" photos gallery' % name):
+            for url in _search_links(query, fresh):
+                key = _norm_url(url)
+                if key not in seen_link:
+                    seen_link.add(key)
+                    links.append(url)
+        if not links:
+            return _set_find(job_id, stage="error", error=(
+                "the web search came back empty — it is probably rate-limiting "
+                "this machine. Give it a minute and try again."))
+
+        pages, per_host = [], {}
+        for url in _find_rank_pages(links, words):
+            site = _site_of(url)
+            if per_host.get(site, 0) >= FIND_PER_HOST:
+                continue
+            per_host[site] = per_host.get(site, 0) + 1
+            pages.append(url)
+            if len(pages) >= FIND_PAGES:
+                break
+
+        _set_find(job_id, stage="mining", total=len(pages))
+        seen_card = set()
+        with ThreadPoolExecutor(max_workers=FIND_WORKERS) as ex:
+            futures = {ex.submit(_find_page_cards, u, fresh): u for u in pages}
+            for fut in as_completed(futures):
+                page_url = futures[fut]
+                try:
+                    _find_collect(job_id, page_url, fut.result(), words, seen_card)
+                except Exception:  # noqa: BLE001
+                    with _find_jobs_lock:
+                        job = _find_jobs.get(job_id)
+                        if job:
+                            job["done"] += 1
+        _set_find(job_id, stage="done")
+    except Exception as e:  # noqa: BLE001
+        _set_find(job_id, stage="error", error=str(e).splitlines()[-1][:250])
+
+
+# ---------- Cast: mirror the wall to the TV, picture only ----------
+#
+# The whole screen goes to the TV as ONE H.264 stream and the sound stays on
+# the PC — not by routing audio anywhere, but because the stream has no audio
+# track at all (-an). Nothing is installed on the TV: it already exposes a
+# DLNA MediaRenderer, so we hand it an HLS URL over UPnP AVTransport and it
+# plays. Verified on the UN43NU7100: a file with no audio track plays, a live
+# never-ending playlist plays, and GetTransportInfo says PLAYING while it does.
+#
+# Two locks keep this from ever landing on the wrong screen (there is a second
+# Samsung on this LAN, and it also answers as a MediaRenderer):
+#   1. the target is pinned by UUID *and* MAC, checked again before every push.
+#      A Samsung shows a different UUID per service and its name is editable
+#      from the remote, so neither is enough alone.
+#   2. the HLS files come from their own listener, bound to the LAN interface
+#      (not 0.0.0.0), that answers the paired TV's IP and nobody else. The main
+#      server, with the proxy and local files, stays on 127.0.0.1.
+#
+# Nothing here is cast "automatically": no pairing without a click, no
+# fallback to "the first TV that answered", no guessing between two matches.
+
+from xml.etree import ElementTree as _ET
+
+CAST_DEVICE_FILE = os.path.join(MS_CACHE_HOME, "cast_device.json")
+CAST_PID_FILE = os.path.join(MS_CACHE_HOME, "cast_ffmpeg.pid")
+CAST_PORT_OFFSET = 50          # cast listener = main port + this (then +1…+9)
+CAST_FPS = 30
+CAST_HEIGHT = 1080             # the TV upscales; 4K would quadruple the encode
+CAST_MAXRATE = "10M"
+CAST_SEGMENT_SECONDS = 1
+CAST_LIST_SIZE = 4
+CAST_WARMUP_SEGMENTS = 3       # the Samsung wants a few segments before it starts
+CAST_START_TIMEOUT = 25        # seconds for ffmpeg to produce those
+CAST_FIRST_FETCH_GRACE = 12    # accepted but never fetched by then = firewall
+CAST_POLL_SECONDS = 3
+CAST_PLAY_BUDGET = 12          # seconds to get from SetAVTransportURI to PLAYING
+CAST_MAX_RESTARTS = 3
+CAST_REPUSH_COOLDOWN = 30
+SSDP_ADDR, SSDP_PORT = "239.255.255.250", 1900
+UPNP_DEV_NS = "urn:schemas-upnp-org:device-1-0"
+AVT_SERVICE = "urn:schemas-upnp-org:service:AVTransport:1"
+# What the renderer is told about the stream, and what our HTTP answers carry.
+# OP=01 (byte-range seek) in the headers is what the NU7100 was tested with.
+DLNA_FEATURES = "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
+
+_cast_lock = threading.Lock()
+_cast = {
+    "state": "idle",           # idle | starting | casting | error
+    "device": None,            # the verified target of this session
+    "url": None, "dir": None, "proc": None, "log": None,
+    "capture": None, "encoder": None, "fps": None, "speed": None,
+    "tv_state": None, "tv_pos": None,
+    "served": 0, "first_fetch": None, "started": None,
+    "restarts": 0, "repushes": 0,
+    "warning": None, "error": None,
+}
+_cast_server = None            # (httpd, ip, port) of the LAN listener
+_cast_capture_mode = None      # "ddagrab" | "gdigrab" | "x11grab", probed once
+
+
+class CastRefused(Exception):
+    """The lock (or a precondition) said no. The message is shown verbatim."""
+
+
+# --- identity -------------------------------------------------------------
+
+def _cast_load_device():
+    try:
+        with open(CAST_DEVICE_FILE, encoding="utf-8") as f:
+            rec = json.load(f)
+        if rec.get("uuid") and rec.get("mac"):
+            return rec
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _cast_save_device(rec):
+    os.makedirs(MS_CACHE_HOME, exist_ok=True)
+    with open(CAST_DEVICE_FILE, "w", encoding="utf-8") as f:
+        json.dump(rec, f, indent=2)
+
+
+def _cast_clear_device():
+    try:
+        os.remove(CAST_DEVICE_FILE)
+    except OSError:
+        pass
+
+
+def _cast_mac_for(ip):
+    """MAC of `ip` from the ARP table — we just fetched its description, so
+    the entry exists. Normalised to AA-BB-CC-DD-EE-FF."""
+    try:
+        if os.name == "nt":
+            out = subprocess.run(["arp", "-a", ip], capture_output=True,
+                                 text=True, timeout=5).stdout
+        else:
+            out = subprocess.run(["ip", "neigh", "show", ip], capture_output=True,
+                                 text=True, timeout=5).stdout
+    except Exception:  # noqa: BLE001
+        return None
+    m = re.search(r"((?:[0-9A-Fa-f]{2}[-:]){5}[0-9A-Fa-f]{2})", out)
+    return m.group(1).upper().replace(":", "-") if m else None
+
+
+def _cast_describe(location):
+    """One renderer from its UPnP description URL, or None if it has no
+    AVTransport (then it cannot be told to play anything)."""
+    try:
+        with urllib.request.urlopen(location, timeout=5) as r:
+            root = _ET.fromstring(r.read())
+    except Exception:  # noqa: BLE001
+        return None
+    ns = {"u": UPNP_DEV_NS}
+    dev = root.find("u:device", ns)
+    if dev is None:
+        return None
+    control = None
+    for svc in dev.iter("{%s}service" % UPNP_DEV_NS):
+        stype = svc.findtext("u:serviceType", "", ns) or ""
+        if stype.startswith("urn:schemas-upnp-org:service:AVTransport"):
+            control = urllib.parse.urljoin(location, svc.findtext("u:controlURL", "", ns) or "")
+    if not control:
+        return None
+    ip = urllib.parse.urlparse(location).hostname
+    return {
+        "uuid": (dev.findtext("u:UDN", "", ns) or "").strip(),
+        "name": (dev.findtext("u:friendlyName", "", ns) or "").strip(),
+        "model": (dev.findtext("u:modelName", "", ns) or "").strip(),
+        "ip": ip,
+        "mac": _cast_mac_for(ip),
+        "control": control,
+    }
+
+
+def cast_discover(timeout=3.0):
+    """Every DLNA MediaRenderer on the LAN right now."""
+    msg = ("M-SEARCH * HTTP/1.1\r\n"
+           "HOST: %s:%d\r\n"
+           "MAN: \"ssdp:discover\"\r\n"
+           "MX: 2\r\n"
+           "ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n\r\n"
+           % (SSDP_ADDR, SSDP_PORT)).encode("ascii")
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(timeout)
+    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+    locations = []
+    try:
+        for _ in range(2):
+            sock.sendto(msg, (SSDP_ADDR, SSDP_PORT))
+        while True:
+            try:
+                data, _addr = sock.recvfrom(65507)
+            except socket.timeout:
+                break
+            for line in data.decode("utf-8", "ignore").split("\r\n"):
+                if line.lower().startswith("location:"):
+                    loc = line.split(":", 1)[1].strip()
+                    if loc and loc not in locations:
+                        locations.append(loc)
+    finally:
+        sock.close()
+    found = []
+    for loc in locations:
+        dev = _cast_describe(loc)
+        if dev and dev not in found:
+            found.append(dev)
+    return found
+
+
+def _cast_check(paired, dev):
+    """Why `dev` may NOT stand in for the paired TV — None when it may."""
+    if dev["uuid"] != paired["uuid"]:
+        return "UUID differs"
+    if not dev.get("mac"):
+        return "its MAC could not be read from the ARP table"
+    if dev["mac"] != paired["mac"]:
+        return ("UUID matches but the MAC changed (%s now, %s when paired)"
+                % (dev["mac"], paired["mac"]))
+    if dev["name"] != paired["name"]:
+        return ("UUID matches but the name changed (%r now, %r when paired)"
+                % (dev["name"], paired["name"]))
+    return None
+
+
+def cast_verify_target():
+    """The one renderer allowed to receive the stream, verified on the network
+    this very moment. Refuses rather than guess."""
+    paired = _cast_load_device()
+    if not paired:
+        raise CastRefused("no TV paired yet — open Cast and pair yours first.")
+    devices = cast_discover()
+    if not devices:
+        raise CastRefused("no DLNA renderer answered on the network. Is the TV on?")
+    ok = [d for d in devices if _cast_check(paired, d) is None]
+    if len(ok) > 1:
+        raise CastRefused("more than one device matches the paired TV — refusing to guess.")
+    if not ok:
+        same = [d for d in devices if d["uuid"] == paired["uuid"]]
+        if same:
+            raise CastRefused("refused: " + _cast_check(paired, same[0]))
+        raise CastRefused("the paired TV (%s) is not on the network — %d other renderer(s) "
+                          "answered and were ignored." % (paired["name"], len(devices)))
+    return ok[0]
+
+
+def cast_pair(uuid_):
+    """Pin one renderer as THE target. Only a device answering right now can
+    be paired, because the MAC comes from talking to it."""
+    if not uuid_:
+        raise CastRefused("no device chosen.")
+    match = [d for d in cast_discover() if d["uuid"] == uuid_]
+    if not match:
+        raise CastRefused("that device did not answer now — only a TV that is on "
+                          "and reachable can be paired.")
+    if len(match) > 1:
+        raise CastRefused("two devices claim the same UUID — refusing to pair.")
+    dev = match[0]
+    if not dev["mac"]:
+        raise CastRefused("could not read the TV's MAC address from the ARP table; "
+                          "pairing needs it.")
+    rec = {"uuid": dev["uuid"], "mac": dev["mac"], "name": dev["name"],
+           "model": dev["model"], "ip": dev["ip"], "paired_at": time.time()}
+    _cast_save_device(rec)
+    return rec
+
+
+# --- talking to the TV ------------------------------------------------------
+
+def _cast_soap(control, action, body=""):
+    envelope = (
+        '<?xml version="1.0"?>'
+        '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" '
+        's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body>'
+        '<u:%s xmlns:u="%s"><InstanceID>0</InstanceID>%s</u:%s>'
+        "</s:Body></s:Envelope>" % (action, AVT_SERVICE, body, action))
+    req = urllib.request.Request(control, data=envelope.encode("utf-8"), headers={
+        "Content-Type": 'text/xml; charset="utf-8"',
+        "SOAPACTION": '"%s#%s"' % (AVT_SERVICE, action),
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.read().decode("utf-8", "ignore")
+    except urllib.error.HTTPError as exc:
+        # A UPnP fault is an HTTP 500 whose body carries the real reason.
+        body = ""
+        try:
+            body = exc.read().decode("utf-8", "ignore")
+        except Exception:  # noqa: BLE001
+            pass
+        code = re.search(r"<errorCode>([^<]*)<", body)
+        desc = re.search(r"<errorDescription>([^<]*)<", body)
+        raise CastRefused("the TV refused %s: %s%s" % (
+            action,
+            desc.group(1).strip() if desc else "HTTP %d" % exc.code,
+            " (UPnP error %s)" % code.group(1).strip() if code else ""))
+
+
+def _cast_didl(url, title):
+    """DIDL-Lite metadata for a live HLS stream: a broadcast, no byte seek."""
+    item = (
+        '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" '
+        'xmlns:dc="http://purl.org/dc/elements/1.1/" '
+        'xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">'
+        '<item id="0" parentID="-1" restricted="1">'
+        "<dc:title>%s</dc:title>"
+        "<upnp:class>object.item.videoItem.videoBroadcast</upnp:class>"
+        '<res protocolInfo="http-get:*:application/vnd.apple.mpegurl:DLNA.ORG_OP=00;'
+        'DLNA.ORG_FLAGS=01700000000000000000000000000000">%s</res>'
+        "</item></DIDL-Lite>" % (title, url))
+    return item.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _cast_push(device, url):
+    """Hand the URL to the TV and make sure it plays.
+
+    After SetAVTransportURI the NU7100 goes TRANSITIONING and usually starts
+    on its own; a Play sent during that moment is answered with UPnP 701
+    "Transition not available" (seen on the real TV). So: wait the transition
+    out, skip Play if the TV already plays, otherwise Play — and give a 701 a
+    few more tries before giving up."""
+    ctrl = device["control"]
+    _cast_soap(ctrl, "SetAVTransportURI",
+               "<CurrentURI>%s</CurrentURI><CurrentURIMetaData>%s</CurrentURIMetaData>"
+               % (url, _cast_didl(url, "MultiScreen")))
+    deadline = time.time() + CAST_PLAY_BUDGET
+    last = None
+    while time.time() < deadline:
+        try:
+            state, _pos = _cast_tv_state(ctrl)
+        except Exception:  # noqa: BLE001
+            state = None
+        if state == "PLAYING":
+            return
+        if state == "TRANSITIONING":
+            time.sleep(0.5)
+            continue
+        try:
+            _cast_soap(ctrl, "Play", "<Speed>1</Speed>")
+            return
+        except CastRefused as exc:
+            last = exc
+            time.sleep(1.0)
+    raise last or CastRefused("the TV did not start playing in time.")
+
+
+def _cast_tv_state(control):
+    """(transport state, position) as the TV itself reports them."""
+    info = _cast_soap(control, "GetTransportInfo")
+    st = re.search(r"<CurrentTransportState>([^<]*)<", info)
+    pos = _cast_soap(control, "GetPositionInfo")
+    rel = re.search(r"<RelTime>([^<]*)<", pos)
+    return (st.group(1) if st else None, rel.group(1) if rel else None)
+
+
+# --- the screen encoder -----------------------------------------------------
+
+def _cast_input_args(mode):
+    if mode == "ddagrab":
+        # Desktop Duplication: the frame is grabbed on the GPU. It comes out as
+        # a D3D11 surface, so it is downloaded before the encoder; the scale
+        # and pixel-format steps ride along in the same graph.
+        return ["-init_hw_device", "d3d11va=dx", "-filter_complex",
+                "ddagrab=output_idx=0:framerate=%d,hwdownload,format=bgra,%s"
+                % (CAST_FPS, _cast_vf())]
+    if mode == "gdigrab":
+        return ["-f", "gdigrab", "-framerate", str(CAST_FPS), "-i", "desktop",
+                "-vf", _cast_vf()]
+    return ["-f", "x11grab", "-framerate", str(CAST_FPS),
+            "-i", os.environ.get("DISPLAY", ":0"), "-vf", _cast_vf()]
+
+
+def _cast_vf():
+    return "scale=-2:%d:flags=fast_bilinear,format=nv12" % CAST_HEIGHT
+
+
+def _cast_probe_capture():
+    """Which screen grabber this ffmpeg/OS can actually run, found once by
+    grabbing a single frame. GPU first, GDI as the fallback."""
+    global _cast_capture_mode
+    if _cast_capture_mode:
+        return _cast_capture_mode
+    modes = ["ddagrab", "gdigrab"] if os.name == "nt" else ["x11grab"]
+    for mode in modes:
+        cmd = ([FFMPEG, "-hide_banner", "-loglevel", "error"] + _cast_input_args(mode)
+               + ["-frames:v", "1", "-f", "null", "-"])
+        try:
+            rc = subprocess.run(cmd, capture_output=True, timeout=30).returncode
+        except Exception:  # noqa: BLE001
+            rc = 1
+        if rc == 0:
+            _cast_capture_mode = mode
+            return mode
+    return None
+
+
+def _cast_ffmpeg_cmd(mode, outdir):
+    gop = CAST_FPS * CAST_SEGMENT_SECONDS
+    cmd = [FFMPEG, "-hide_banner", "-loglevel", "warning", "-nostats",
+           "-progress", "pipe:1"]
+    cmd += _cast_input_args(mode)
+    # -an is the whole audio story: there is no track for the TV to play.
+    cmd += ["-an", "-fps_mode", "cfr", "-r", str(CAST_FPS)]
+    cmd += _venc_args(VIDEO_ENCODER)
+    cmd += ["-maxrate", CAST_MAXRATE, "-bufsize", CAST_MAXRATE,
+            # One keyframe per segment, exactly on the boundary.
+            "-g", str(gop), "-keyint_min", str(gop),
+            "-force_key_frames", "expr:gte(t,n_forced*%d)" % CAST_SEGMENT_SECONDS,
+            "-f", "hls", "-hls_time", str(CAST_SEGMENT_SECONDS),
+            "-hls_list_size", str(CAST_LIST_SIZE),
+            "-hls_flags", "delete_segments+omit_endlist+independent_segments+temp_file",
+            "-hls_segment_type", "mpegts",
+            "-hls_segment_filename", os.path.join(outdir, "live%d.ts"),
+            os.path.join(outdir, "live.m3u8")]
+    return cmd
+
+
+def _cast_read_progress(proc):
+    """ffmpeg -progress on stdout: keep fps/speed for the status line."""
+    try:
+        for raw in proc.stdout:
+            key, _, val = raw.decode("utf-8", "ignore").strip().partition("=")
+            with _cast_lock:
+                if _cast["proc"] is not proc:
+                    continue
+                if key == "fps":
+                    try:
+                        _cast["fps"] = float(val)
+                    except ValueError:
+                        pass
+                elif key == "speed":
+                    _cast["speed"] = val.strip()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _cast_log_tail(path, n=6):
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as f:
+            lines = [l.rstrip() for l in f if l.strip()]
+        return " | ".join(lines[-n:])[-600:]
+    except OSError:
+        return ""
+
+
+def _cast_spawn(outdir):
+    mode = _cast_probe_capture()
+    if not mode:
+        raise CastRefused("this ffmpeg cannot capture the screen (no ddagrab/gdigrab). "
+                          "Install a full build (winget install Gyan.FFmpeg) and restart.")
+    log = os.path.join(outdir, "ffmpeg.log")
+    errf = open(log, "w", encoding="utf-8")
+    proc = subprocess.Popen(_cast_ffmpeg_cmd(mode, outdir), stdout=subprocess.PIPE,
+                            stderr=errf, stdin=subprocess.DEVNULL)
+    try:
+        os.makedirs(MS_CACHE_HOME, exist_ok=True)
+        with open(CAST_PID_FILE, "w", encoding="utf-8") as f:
+            f.write(str(proc.pid))
+    except OSError:
+        pass
+    threading.Thread(target=_cast_read_progress, args=(proc,), daemon=True).start()
+    return proc, mode, log
+
+
+def _cast_wait_playlist(outdir, proc):
+    """Until the playlist lists CAST_WARMUP_SEGMENTS segments — or ffmpeg dies."""
+    m3u8 = os.path.join(outdir, "live.m3u8")
+    deadline = time.time() + CAST_START_TIMEOUT
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            return False
+        try:
+            with open(m3u8, encoding="utf-8") as f:
+                if sum(1 for l in f if l.strip().endswith(".ts")) >= CAST_WARMUP_SEGMENTS:
+                    return True
+        except OSError:
+            pass
+        time.sleep(0.25)
+    return False
+
+
+def _cast_kill(proc):
+    if not proc:
+        return
+    try:
+        proc.terminate()
+        proc.wait(timeout=5)
+    except Exception:  # noqa: BLE001
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        os.remove(CAST_PID_FILE)
+    except OSError:
+        pass
+
+
+def _cast_reap_orphan():
+    """An ffmpeg left behind by a crashed server would keep grabbing the
+    screen forever. Kill it — after checking the PID still IS an ffmpeg."""
+    pid = None
+    try:
+        with open(CAST_PID_FILE, encoding="utf-8") as f:
+            pid = int(f.read().strip())
+    except (OSError, ValueError):
+        pass
+    if pid:
+        try:
+            if os.name == "nt":
+                out = subprocess.run(["tasklist", "/FI", "PID eq %d" % pid, "/FO", "CSV", "/NH"],
+                                     capture_output=True, text=True, timeout=10).stdout
+                if "ffmpeg" in out.lower():
+                    subprocess.run(["taskkill", "/PID", str(pid), "/F"],
+                                   capture_output=True, timeout=10)
+            else:
+                with open("/proc/%d/cmdline" % pid, "rb") as f:
+                    if b"ffmpeg" in f.read():
+                        os.kill(pid, 15)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            os.remove(CAST_PID_FILE)
+        except OSError:
+            pass
+    for d in glob.glob(os.path.join(tempfile.gettempdir(), "multiscreen_cast_*")):
+        shutil.rmtree(d, ignore_errors=True)
+
+
+# --- the LAN listener ---------------------------------------------------------
+
+class CastHandler(BaseHTTPRequestHandler):
+    """Serves the live HLS to the paired TV, and to nobody else."""
+
+    protocol_version = "HTTP/1.1"
+    _path_re = re.compile(r"^/cast/(live\.m3u8|live\d+\.ts)$")
+
+    def log_message(self, fmt, *args):
+        # One line per second forever would be noise, so only while the cast
+        # is starting — that is when "what did the TV ask for?" matters.
+        with _cast_lock:
+            starting = _cast["state"] == "starting"
+        if starting:
+            sys.stderr.write("  [cast] %s %s\n" % (self.client_address[0], fmt % args))
+
+    def handle_one_request(self):
+        # A renderer that drops a transfer and reconnects is normal.
+        try:
+            super().handle_one_request()
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+            self.close_connection = True
+
+    def do_HEAD(self):
+        self._serve(head=True)
+
+    def do_GET(self):
+        self._serve(head=False)
+
+    def _deny(self, code):
+        self.send_response(code)
+        self.send_header("Content-Length", "0")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+    def _serve(self, head):
+        with _cast_lock:
+            dev, outdir, state = _cast["device"], _cast["dir"], _cast["state"]
+        client = self.client_address[0]
+        if not dev or client != dev["ip"] or state not in ("starting", "casting"):
+            sys.stderr.write("  [cast] refused %s %s\n" % (client, self.path))
+            return self._deny(403)
+        m = self._path_re.match(self.path.split("?", 1)[0])
+        if not m or not outdir:
+            return self._deny(404)
+        name = m.group(1)
+        path = os.path.join(outdir, name)
+        try:
+            size = os.path.getsize(path)
+            f = open(path, "rb")
+        except OSError:
+            return self._deny(404)
+        with f:
+            start, end, status = 0, size - 1, 200
+            rng = self.headers.get("Range")
+            if rng:
+                rm = re.match(r"bytes=(\d*)-(\d*)", rng)
+                if rm:
+                    start = int(rm.group(1) or 0)
+                    end = int(rm.group(2)) if rm.group(2) else size - 1
+                    end = min(end, size - 1)
+                    if start > end:
+                        return self._deny(416)
+                    status = 206
+            self.send_response(status)
+            if name.endswith(".m3u8"):
+                self.send_header("Content-Type", "application/vnd.apple.mpegurl")
+                self.send_header("Cache-Control", "no-cache, no-store")
+            else:
+                self.send_header("Content-Type", "video/mp2t")
+            self.send_header("Content-Length", str(end - start + 1))
+            self.send_header("Accept-Ranges", "bytes")
+            if status == 206:
+                self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, size))
+            self.send_header("transferMode.dlna.org", "Streaming")
+            self.send_header("contentFeatures.dlna.org", DLNA_FEATURES)
+            self.end_headers()
+            if not head:
+                f.seek(start)
+                left = end - start + 1
+                while left > 0:
+                    chunk = f.read(min(65536, left))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    left -= len(chunk)
+        with _cast_lock:
+            if _cast["first_fetch"] is None:
+                _cast["first_fetch"] = time.time()
+            if name.endswith(".ts") and not head:
+                _cast["served"] += 1
+
+
+def _cast_lan_ip(target_ip):
+    """Our address on the interface that reaches the TV (no packet is sent)."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect((target_ip, 9))
+        return s.getsockname()[0]
+    finally:
+        s.close()
+
+
+def _cast_ensure_server(lan_ip):
+    """The listener, bound to `lan_ip` only. Rebinds if the interface changed."""
+    global _cast_server
+    if _cast_server and _cast_server[1] == lan_ip:
+        return _cast_server[2]
+    if _cast_server:
+        try:
+            _cast_server[0].shutdown()
+            _cast_server[0].server_close()
+        except Exception:  # noqa: BLE001
+            pass
+        _cast_server = None
+    base = (PROXY_PORTS[0] if PROXY_PORTS else 8000) + CAST_PORT_OFFSET
+    last = None
+    for port in range(base, base + 10):
+        try:
+            httpd = Server((lan_ip, port), CastHandler)
+        except OSError as exc:
+            last = exc
+            continue
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        _cast_server = (httpd, lan_ip, port)
+        return port
+    raise CastRefused("could not open a port for the cast listener (%s)" % last)
+
+
+# --- the session ----------------------------------------------------------------
+
+def cast_status():
+    with _cast_lock:
+        s = dict(_cast)
+    casting = s["state"] == "casting" and s["started"]
+    return {
+        "ok": True,
+        "state": s["state"],
+        "paired": _cast_load_device(),
+        "device": s["device"],
+        "url": s["url"],
+        "tv": {"state": s["tv_state"], "position": s["tv_pos"]},
+        "encoder": s["encoder"], "capture": s["capture"],
+        "fps": s["fps"], "speed": s["speed"],
+        "served": s["served"],
+        "reached": s["first_fetch"] is not None,
+        "uptime": (time.time() - s["started"]) if casting else 0,
+        "restarts": s["restarts"], "repushes": s["repushes"],
+        "warning": s["warning"], "error": s["error"],
+    }
+
+
+def _cast_teardown(error=None):
+    """Stop everything: tell the TV, kill ffmpeg, drop the segments."""
+    with _cast_lock:
+        proc, dev, outdir, was = _cast["proc"], _cast["device"], _cast["dir"], _cast["state"]
+        _cast.update(state="error" if error else "idle", proc=None, url=None, dir=None,
+                     error=error, fps=None, speed=None, started=None,
+                     tv_state=None, tv_pos=None)
+    if dev and was in ("casting", "starting"):
+        try:
+            _cast_soap(dev["control"], "Stop")
+        except Exception:  # noqa: BLE001
+            pass
+    _cast_kill(proc)
+    if outdir:
+        shutil.rmtree(outdir, ignore_errors=True)
+
+
+def cast_stop():
+    _cast_teardown()
+    return cast_status()
+
+
+def cast_start():
+    with _cast_lock:
+        if _cast["state"] in ("starting", "casting"):
+            return cast_status()
+        _cast.update(state="starting", error=None, warning=None, url=None,
+                     served=0, first_fetch=None, restarts=0, repushes=0,
+                     fps=None, speed=None, tv_state=None, tv_pos=None)
+    try:
+        if not FFMPEG:
+            raise CastRefused("ffmpeg not found on the server. Install it (winget install "
+                              "Gyan.FFmpeg, or pip install imageio-ffmpeg) and restart.")
+        target = cast_verify_target()
+        lan_ip = _cast_lan_ip(target["ip"])
+        port = _cast_ensure_server(lan_ip)
+        outdir = tempfile.mkdtemp(prefix="multiscreen_cast_")
+        with _cast_lock:
+            _cast.update(device=target, dir=outdir)
+        proc, mode, log = _cast_spawn(outdir)
+        with _cast_lock:
+            _cast.update(proc=proc, capture=mode, encoder=VIDEO_ENCODER, log=log)
+        if not _cast_wait_playlist(outdir, proc):
+            tail = _cast_log_tail(log)
+            raise CastRefused("the screen encoder did not start" + (": " + tail if tail else "."))
+        url = "http://%s:%d/cast/live.m3u8" % (lan_ip, port)
+        _cast_push(target, url)
+        with _cast_lock:
+            _cast.update(state="casting", url=url, started=time.time())
+        threading.Thread(target=_cast_monitor, args=(proc,), daemon=True).start()
+        sys.stderr.write("  [cast] %s (%s) <- %s via %s/%s\n"
+                         % (target["name"], target["mac"], url, mode, VIDEO_ENCODER))
+    except CastRefused as exc:
+        _cast_teardown(error=str(exc))
+        raise
+    except Exception as exc:  # noqa: BLE001
+        _cast_teardown(error="cast failed: %s" % exc)
+        raise
+    return cast_status()
+
+
+def _cast_monitor(proc):
+    """While casting: keep ffmpeg alive, ask the TV what it is doing, push
+    again if it stopped, and say so when the TV never came for the stream."""
+    stopped_polls = 0
+    last_repush = 0.0
+    while True:
+        time.sleep(CAST_POLL_SECONDS)
+        with _cast_lock:
+            if _cast["state"] != "casting" or _cast["proc"] is not proc:
+                return
+            snap = dict(_cast)
+
+        if proc.poll() is not None:
+            tail = _cast_log_tail(snap["log"])
+            if snap["restarts"] >= CAST_MAX_RESTARTS:
+                _cast_teardown(error="the screen encoder keeps dying" + (": " + tail if tail else "."))
+                return
+            try:
+                newdir = tempfile.mkdtemp(prefix="multiscreen_cast_")
+                newproc, _mode, newlog = _cast_spawn(newdir)
+                if not _cast_wait_playlist(newdir, newproc):
+                    raise CastRefused("encoder restart failed: " + _cast_log_tail(newlog))
+                with _cast_lock:
+                    _cast.update(proc=newproc, dir=newdir, log=newlog)
+                    _cast["restarts"] += 1
+                    _cast["warning"] = "the encoder died and was restarted" + (" (" + tail + ")" if tail else "")
+                shutil.rmtree(snap["dir"], ignore_errors=True)
+                _cast_push(snap["device"], snap["url"])
+                proc = newproc
+            except Exception as exc:  # noqa: BLE001
+                _cast_teardown(error=str(exc))
+                return
+            continue
+
+        if snap["first_fetch"] is None and time.time() - snap["started"] > CAST_FIRST_FETCH_GRACE:
+            port = urllib.parse.urlparse(snap["url"]).port
+            with _cast_lock:
+                _cast["warning"] = ("the TV accepted the stream but never asked for it — "
+                                    "a firewall on this PC is probably blocking TCP port %d "
+                                    "for python.exe" % port)
+
+        try:
+            st, pos = _cast_tv_state(snap["device"]["control"])
+        except Exception:  # noqa: BLE001
+            st, pos = None, None
+        with _cast_lock:
+            _cast["tv_state"], _cast["tv_pos"] = st, pos
+
+        stopped_polls = stopped_polls + 1 if st in ("STOPPED", "NO_MEDIA_PRESENT") else 0
+        if stopped_polls >= 2 and time.time() - last_repush > CAST_REPUSH_COOLDOWN:
+            stopped_polls = 0
+            last_repush = time.time()
+            try:
+                # The lock applies to every push, including this one.
+                target = cast_verify_target()
+                _cast_push(target, snap["url"])
+                with _cast_lock:
+                    _cast["device"] = target
+                    _cast["repushes"] += 1
+                    _cast["warning"] = "the TV had stopped — the stream was pushed again"
+            except CastRefused as exc:
+                _cast_teardown(error=str(exc))
+                return
+            except Exception as exc:  # noqa: BLE001
+                with _cast_lock:
+                    _cast["warning"] = "re-push failed: %s" % exc
+
+
+def cast_selftest():
+    """Prove the lock on the live network: the paired TV passes, every other
+    renderer is refused. Exit code 0 = PASS. Run: python server.py --cast-selftest"""
+    paired = _cast_load_device()
+    print("Cast self-test")
+    print("  paired: %s" % (("%s (%s)  uuid=%s  mac=%s" % (paired["name"], paired["model"],
+                            paired["uuid"], paired["mac"])) if paired else "none"))
+    devices = cast_discover(4.0)
+    print("  renderers answering now: %d" % len(devices))
+    for d in devices:
+        print("    - %-18s %-14s %-16s %-18s %s" % (d["name"], d["model"], d["ip"],
+                                                   d["mac"] or "(no MAC)", d["uuid"]))
+    if not paired:
+        print("FAIL: no TV paired - pair one in the app first.")
+        return 1
+    ok = True
+    try:
+        t = cast_verify_target()
+        print("PASS: would cast to %s (%s, %s)" % (t["name"], t["ip"], t["mac"]))
+    except CastRefused as exc:
+        print("FAIL: paired TV not accepted - %s" % exc)
+        ok = False
+    others = [d for d in devices if d["uuid"] != paired["uuid"]]
+    for d in others:
+        why = _cast_check(paired, d)
+        if why:
+            print("PASS: %s (%s) refused - %s" % (d["name"], d["ip"], why))
+        else:
+            print("FAIL: %s (%s) would be ACCEPTED" % (d["name"], d["ip"]))
+            ok = False
+    if not others:
+        print("  note: no other renderer was on the network to be refused this time")
+    print("RESULT: %s" % ("PASS" if ok else "FAIL"))
+    return 0 if ok else 1
+
+
 # ---------- diagnosis helpers ----------
 
 def _safe_url(u):
@@ -3875,6 +5317,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.handle_clip_status(qs)
         if path == "/api/clip/index/status":
             return self.handle_clip_index_status(qs)
+        if path == "/api/find/status":
+            return self.handle_find_status(qs)
         if path == "/api/channel/status":
             return self.handle_channel_status(qs)
         if path == "/api/shrink/status":
@@ -3885,6 +5329,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.handle_voices(qs)
         if path == "/api/tts":
             return self.handle_tts(qs)
+        if path == "/api/cast/status":
+            return self.handle_cast_status(qs)
+        if path == "/api/cast/devices":
+            return self.handle_cast_devices(qs)
         if path.startswith("/api/localfile/"):
             return self.handle_localfile(path)
         return self.handle_static(path)
@@ -3912,8 +5360,18 @@ class Handler(BaseHTTPRequestHandler):
             return self.handle_upload(qs)
         if parsed.path == "/api/shrink":
             return self.handle_shrink(qs)
+        if parsed.path == "/api/find":
+            return self.handle_find()
         if parsed.path == "/api/related":
             return self.handle_related()
+        if parsed.path == "/api/cast/pair":
+            return self.handle_cast_pair()
+        if parsed.path == "/api/cast/unpair":
+            return self.handle_cast_unpair()
+        if parsed.path == "/api/cast/start":
+            return self.handle_cast_start()
+        if parsed.path == "/api/cast/stop":
+            return self.handle_cast_stop()
         return self.send_error(404, "Not found")
 
     def do_OPTIONS(self):
@@ -4368,7 +5826,7 @@ class Handler(BaseHTTPRequestHandler):
             "models": models,
             "presets": [{"id": k, "label": v["label"], "window": v["window"],
                          "prefer": v.get("prefer", "best"), "gate": v.get("gate", 0.35),
-                         "model": v.get("model", "")}
+                         "grow": v.get("grow", 0.5), "model": v.get("model", "")}
                         for k, v in CLIP_PRESETS.items()],
             "provider": _clip_provider or "",
             "gpu": bool(np and ort and
@@ -4597,8 +6055,12 @@ class Handler(BaseHTTPRequestHandler):
                 "current": "", "error": None, "missed": [], "ts": now,
                 "cut_done": 0, "total_cuts": 0, "compile_id": None, "title": "",
             }
+        try:
+            gate = float(data["gate"]) if data.get("gate") not in (None, "") else None
+        except (TypeError, ValueError):
+            gate = None
         threading.Thread(target=_run_channel_job,
-                         args=(job_id, url, limit, preset, model, resolution),
+                         args=(job_id, url, limit, preset, model, resolution, gate),
                          daemon=True).start()
         return self.send_json({"ok": True, "job_id": job_id})
 
@@ -4613,6 +6075,54 @@ class Handler(BaseHTTPRequestHandler):
         snap["ok"] = True
         snap["ready"] = snap["stage"] == "done"
         snap.pop("result", None)          # a server path is no use to the browser
+        return self.send_json(snap)
+
+    # ---------- /api/find (a name in, a wall of thumbnails out) ----------
+
+    def handle_find(self):
+        """Start a search for a name and return its job id."""
+        data = self._body_json()
+        if data is None:
+            return self.send_json({"ok": False, "error": "invalid JSON body"}, 400)
+        name = re.sub(r"\s+", " ", (data.get("name") or "")).strip()[:80]
+        if len(name) < 2:
+            return self.send_json({"ok": False, "error": "type a name first"}, 400)
+
+        job_id = uuid.uuid4().hex
+        now = time.time()
+        with _find_jobs_lock:
+            for jid in [k for k, v in _find_jobs.items()
+                        if now - v.get("ts", now) > FIND_JOB_TTL]:
+                _find_jobs.pop(jid, None)
+            _find_jobs[job_id] = {
+                "stage": "queued", "name": name, "items": [], "done": 0,
+                "total": 0, "found": 0, "error": None, "ts": now,
+            }
+        threading.Thread(target=_run_find_job,
+                         args=(job_id, name, bool(data.get("fresh"))),
+                         daemon=True).start()
+        return self.send_json({"ok": True, "job_id": job_id, "name": name})
+
+    def handle_find_status(self, qs):
+        """Whatever has landed since the browser's last poll. `since` is how
+        many cards it already has, so a long search is never re-sent."""
+        job_id = (qs.get("id") or [""])[0]
+        try:
+            since = max(0, int((qs.get("since") or ["0"])[0]))
+        except ValueError:
+            since = 0
+        with _find_jobs_lock:
+            job = _find_jobs.get(job_id)
+            if not job:
+                return self.send_json({"ok": False,
+                                       "error": "unknown or expired search"}, 404)
+            items = job["items"][since:]
+            snap = {"stage": job["stage"], "done": job["done"],
+                    "total": job["total"], "found": job["found"],
+                    "error": job["error"], "name": job["name"]}
+            job["ts"] = time.time()
+        snap.update({"ok": True, "items": items, "next": since + len(items),
+                     "ready": snap["stage"] in ("done", "error")})
         return self.send_json(snap)
 
     # ---------- /api/related (a tile like the ones already up) ----------
@@ -5525,6 +7035,64 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------- helpers ----------
 
+    # ---------- /api/cast (mirror the wall to the paired TV) ----------
+
+    def _cast_body(self):
+        # Always called, even by handlers that ignore the body: on a kept-alive
+        # connection an unread body becomes the start of the next request.
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        raw = self.rfile.read(length) if length > 0 else b""
+        try:
+            return json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def handle_cast_devices(self, qs):
+        """Every renderer on the LAN, each marked with how the lock sees it."""
+        paired = _cast_load_device()
+        devices = cast_discover()
+        for d in devices:
+            d["paired"] = bool(paired and d["uuid"] == paired["uuid"])
+            d["verdict"] = _cast_check(paired, d) if paired else None
+        return self.send_json({"ok": True, "paired": paired, "devices": devices})
+
+    def handle_cast_pair(self):
+        data = self._cast_body()
+        try:
+            rec = cast_pair(str(data.get("uuid") or "").strip())
+        except CastRefused as exc:
+            return self.send_json({"ok": False, "error": str(exc)}, 403)
+        return self.send_json({"ok": True, "paired": rec})
+
+    def handle_cast_unpair(self):
+        self._cast_body()
+        with _cast_lock:
+            busy = _cast["state"] in ("starting", "casting")
+        if busy:
+            return self.send_json({"ok": False, "error": "stop the cast first."}, 409)
+        _cast_clear_device()
+        return self.send_json({"ok": True, "paired": None})
+
+    def handle_cast_start(self):
+        self._cast_body()
+        try:
+            return self.send_json(cast_start())
+        except CastRefused as exc:
+            return self.send_json(dict(cast_status(), ok=False, error=str(exc)), 403)
+        except Exception as exc:  # noqa: BLE001
+            return self.send_json(dict(cast_status(), ok=False,
+                                       error="cast failed: %s" % exc), 500)
+
+    def handle_cast_stop(self):
+        self._cast_body()
+        return self.send_json(cast_stop())
+
+    def handle_cast_status(self, qs):
+        return self.send_json(cast_status())
+
     def send_json(self, obj, status=200):
         data = json.dumps(obj).encode("utf-8")
         self.send_response(status)
@@ -5559,7 +7127,12 @@ class Server(ThreadingHTTPServer):
 
 def main():
     global PROXY_PORTS, _port_cycle
-    base = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
+    flags = {a for a in sys.argv[1:] if a.startswith("--")}
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    base = int(args[0]) if args else 8000
+    if "--cast-selftest" in flags:
+        sys.exit(cast_selftest())
+    _cast_reap_orphan()
 
     servers = []
     ports = []
@@ -5612,6 +7185,12 @@ def main():
     # older server.py is running and none of the current fixes are live.
     print("Segment RAM cache:      %d MB  — looping tiles stop re-hitting the CDN"
           % (MEDIA_CACHE_MAX_BYTES // (1024 * 1024)))
+    _paired = _cast_load_device()
+    if _paired:
+        print("Cast to TV:             paired with %s (%s) - the only screen it will ever use"
+              % (_paired["name"], _paired["model"]))
+    else:
+        print("Cast to TV:             not paired - open Cast in the app to pair your TV")
     print("Ctrl+C to stop.")
 
     for httpd in servers[1:]:
@@ -5620,6 +7199,7 @@ def main():
         servers[0].serve_forever()
     except KeyboardInterrupt:
         print("\nStopping…")
+        cast_stop()
         for httpd in servers:
             httpd.shutdown()
 

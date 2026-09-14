@@ -20,7 +20,10 @@ Cole a URL de qualquer vídeo e ele aparece num player da grade. Funciona com ar
 - **🗂 Tabs** — adiciona **todas as guias abertas do navegador** de uma vez (requer a extensão companheira, veja abaixo).
 - **🎬 Compile** — corta trechos de qualquer tile e exporta tudo como um `.mp4` só. O **REC** de cada tile só aparece com o mouse em cima dele (e continua visível enquanto grava), pra não poluir a grade.
 - **🎯 Moments** — acha sozinho os momentos interessantes de cada tile (corte de cena, movimento e volume, medidos por ffmpeg aqui na máquina) e transforma em compilação.
+- **🔎 Find** — aba separada: você digita o nome de uma atriz e vem uma grade de fotos e
+  thumbs de vídeo de vários sites, cada card abrindo a página de origem em outra guia.
 - **🧠 Search** — dentro do Moments: você escreve o que procura (`kiss, explosion, close-up of a face`) e o **CLIP roda local** pra achar os segundos parecidos, em cada tile. Grátis, offline, sem chave.
+- **📡 Cast** — espelha a parede na TV pela rede local **sem levar o som** (o stream não tem faixa de áudio; o fone continua sendo o padrão do Windows). Só pra TV pareada, conferida por UUID + MAC antes de cada start.
 
 ## Como rodar
 
@@ -109,6 +112,59 @@ e como o que já está na parede é excluído, os seguintes trazem coisas novas.
 atual tiver página pra raspar (parede só de arquivos locais, links diretos ou embeds), ele
 cai pras páginas de sites que você já usou.
 
+## 🔎 Find — digita um nome, vem a web em miniaturas
+
+A aba **Find** (ao lado de **Wall**, no topo) é a única parte do MultiScreen que não começa
+por uma URL: ela começa por um **nome**. Um buscador escolhe as páginas, e o servidor abre
+cada uma e fica com as miniaturas.
+
+**Sem lista de sites e sem regra por site.** O que define um card é uma regra só: um `<a>`
+com um `<img>` dentro, apontando pro **mesmo site** da página (link pra fora, ali, é
+anúncio). Isso pega de uma vez a grade de um tube, a página de uma performer e um índice de
+galeria, sem saber qual das três está lendo — e deixa de fora menu, sidebar e banner, que
+não são foto linkando pra dentro do site.
+
+**Vídeo ou foto** sai do caminho da URL (`/gallery/`, `/photos/` de um lado; `/video/`,
+`/watch/`, `/scene/` do outro) e, quando a URL não diz, o card herda o que a página é. O
+tempo (`18:43`) vem do texto do próprio card, quando o site mostra.
+
+**O que fica de fora:** link de categoria/tag/perfil (`/category/anal`, `/pornstars/fulana`)
+— vem com imagem própria e viraria um card chamado "Anal"; `<script>`/`<style>`, que
+carregam âncoras que não existem na página; imagem menor que 90 px, sprite, avatar, logo; e
+o "thumb" que na verdade é o `.mp4` do preview de hover, que um `<img>` não sabe mostrar.
+Miniatura que mesmo assim não carrega (403, link morto) some da grade: quem avisa é o
+próprio navegador, no `error` da imagem.
+
+**Miniatura passa pelo proxy.** Quase todo site desses bloqueia hotlink; pedida direto pela
+página ela dá 403, pedida pelo `/api/proxy` com a **página de origem como `Referer`** ela
+vem. É o mesmo proxy dos vídeos, então elas também entram no cache de RAM.
+
+**Buscador: uma corrente, não uma escolha.** DuckDuckGo HTML → Brave → SearXNG, todos sem
+chave e cada um com o botão de safe search desligado (`kp=-2`, `safesearch=off`,
+`safesearch=0`), porque sem isso a busca por uma performer volta vazia. Eles limitam por IP
+com frequência: quem devolve a página de robô (o "anomaly") conta como recusa, o próximo da
+fila assume e o que recusou fica **10 min** de castigo. Aqui a **impersonation vem primeiro**
+— ao contrário da regra do resto do servidor — porque o cliente comum é reconhecido pelo
+handshake TLS e leva a página de robô toda vez; e ela é pedida **sem nenhum header nosso**,
+já que um `User-Agent` escrito à mão do lado de um handshake do Chrome é o próprio denúncia.
+
+**Ritmo.** São 3 consultas (o nome, `"nome" videos`, `"nome" photos gallery`), até **30
+páginas** (no máximo 4 por site, pra um site grande não comer o orçamento), **8 em paralelo**.
+Os cards aparecem conforme cada página responde — os primeiros em ~2 s, o resto até ~15 s —
+e dentro de cada página os que **nomeiam a busca** vêm na frente. A barra em cima mostra
+quantas páginas já foram lidas.
+
+**Cache em disco** em `~/.cache/multiscreen/find`: resposta do buscador por 3 h, página
+minerada por 6 h (inclusive as que falharam, pra não insistir o dia inteiro). Repetir o mesmo
+nome pinta na hora e não custa nada aos sites. O botão **↻ Fresh** ignora tudo isso.
+
+**Filtros:** `All / 🎬 Videos / 🖼 Photos` e **Name match**, que deixa só os cards cujo
+título ou link carrega o nome buscado — útil quando uma página traz junto a grade genérica
+do site.
+
+Clicar num card **abre o site de origem em outra guia**: o Find é um índice, não um player.
+Pra assistir, cole a URL na aba **Wall** como sempre.
+
 ## Pacote (.zip) e o tamanho do tile
 
 **📦 Pack** baixa todos os vídeos da grade num único `.zip` (com o `multiscreen.json`
@@ -134,6 +190,69 @@ Quem re-encoda é o servidor, com a GPU (`h264_nvenc`, ~3,5× tempo real numa fo
 cai pra `libx264` se a GPU recusar). Vinte tiles a 768x432/30 somam menos decode que um
 único stream 4K60 — e os arquivos ficam ~15× menores, o que também deixa cada reinício
 de loop 100% local.
+
+## 📡 Cast — a parede na TV, o som no fone
+
+**📡 Cast** manda a tela inteira pra TV pela rede local — e o som **não vai junto**. Não
+por algum malabarismo de rotear áudio: o stream que a TV recebe simplesmente **não tem
+faixa de áudio** (`-an`). Os `<video>` continuam tocando no navegador como sempre, no
+dispositivo de som padrão do Windows, que continua sendo o seu fone.
+
+Na TV não se instala nada. Uma Samsung (e a maioria das TVs) já expõe um *MediaRenderer*
+DLNA; o servidor entrega a ela uma URL HLS por UPnP `AVTransport` e ela toca. Do lado do
+PC, o `ffmpeg` captura o monitor pela GPU (`ddagrab`, Desktop Duplication), codifica em
+`h264_nvenc` a 1080p/30 (a TV faz o upscale; 4K quadruplicaria o custo enquanto 40 tiles
+decodificam) e escreve segmentos HLS de 1s. Clicar **▶ Start casting** também põe a grade
+em tela cheia — a TV mostra exatamente a parede, sem barra de tarefas.
+
+### A trava: só a sua TV, nunca outra
+
+Existe uma segunda Samsung nesta rede, e ela também responde como *MediaRenderer*. Por
+isso nada aqui "escolhe a primeira TV que aparecer":
+
+- **Pareamento explícito, uma vez.** Em *Pair a TV…* o app lista os renderers da rede,
+  você escolhe o seu e confirma. Fica gravado em `~/.cache/multiscreen/cast_device.json`.
+- **Identidade = UUID + MAC.** Nome é editável pelo controle remoto, e uma Samsung expõe
+  **UUIDs diferentes por serviço** — então o UUID do *MediaRenderer* e o MAC (lido da
+  tabela ARP) precisam bater, os dois, **antes de cada start**. Nome mudou, MAC mudou, dois
+  aparelhos casando, nenhum casando: recusa e diz por quê. Não há fallback.
+- **O stream só é servido à TV pareada.** Os arquivos HLS saem de um listener próprio,
+  preso ao IP da interface da LAN (não `0.0.0.0`), na porta `principal + 50`, que responde
+  **só ao IP da TV pareada** — qualquer outro cliente, inclusive o próprio PC, leva 403. O
+  servidor principal, com proxy e arquivos locais, continua só em `127.0.0.1`.
+
+`python server.py --cast-selftest` prova a trava na rede real: a TV pareada tem que
+passar e todo outro renderer tem que ser recusado. Rode antes de mexer no cast.
+
+### Enquanto toca
+
+O modal mostra o que **a própria TV reporta** (`PLAYING` e a posição, via
+`GetTransportInfo`), o fps e a velocidade do encoder, e quantos segmentos já foram
+servidos. Se o encoder cair, é reiniciado e o stream re-entregue; se a TV parar (ela às
+vezes larga um stream ao vivo), é empurrado de novo — sempre passando pela mesma trava.
+Se a TV aceitar o stream mas nunca vier buscar, o aviso aponta o firewall do Windows
+(porta TCP `principal + 50` pro `python.exe`).
+
+**🕒 Clock in the corner** desenha um relógio com milissegundos na grade. Olhe o PC e a
+TV ao mesmo tempo e a diferença é o atraso real — alguns segundos, pelo buffer HLS da TV.
+O som do fone chega antes da imagem da TV; compensar isso (atrasar o áudio do PC) é um
+passo à parte, ainda não feito. Não dá pra resolver com um `DelayNode`, porque
+`createMediaElementSource` silencia mídia cross-origin e a parede é cheia dela; o
+caminho é um `<audio>` gêmeo atrasado, só nos tiles que estão com som.
+
+### Detalhes que custaram uma tarde
+
+- Depois do `SetAVTransportURI`, a NU7100 entra em `TRANSITIONING` e **começa a tocar
+  sozinha**. Um `Play` mandado nesse instante recebe UPnP **701 "Transition not
+  available"** — parece que a TV recusou o stream, mas ela só estava ocupada aceitando.
+  O servidor espera a transição acabar, pula o `Play` se ela já toca e repete um 701 por
+  alguns segundos.
+- Handlers POST em HTTP/1.1 precisam **ler o corpo** mesmo quando não o usam: com
+  keep-alive, um `{}` não lido vira o começo da próxima requisição da mesma conexão
+  (`Unsupported method ('{}GET')`).
+
+Requisito: um `ffmpeg` com `h264_nvenc` e `ddagrab` — o do `winget install Gyan.FFmpeg`
+tem os dois; sem GPU NVIDIA cai pra `gdigrab` + `libx264`, que também segura 1080p30.
 
 ## 🎯 Moments — o servidor acha os momentos
 
@@ -277,6 +396,45 @@ resposta certa para "esse aqui não termina assim" — e aparece como `nothing m
 
 Para escrever um preset novo, é o dicionário `CLIP_PRESETS` no `server.py`: nome, janela,
 lista positiva, lista negativa. O painel lê a lista do servidor sozinho.
+
+#### Segunda rodada: clipes mais curtos e mais exigentes
+
+Depois de uma compilação real (60 vídeos, 43 clipes, 42 min), duas queixas: clipes longos
+demais e com trechos não relacionados. Cada uma tem seu parafuso, e um deles é de graça:
+
+| até onde o clipe cresce | acerto | duração dos clipes |
+|---|---|---|
+| 50% do pico | 3/4, 0 falso pos. | 77 s, 63 s, 25 s |
+| **70% do pico** | **3/4, 0 falso pos.** | **20 s, 30 s, 23 s** |
+
+Crescer só até 70% do pico corta o clipe a um terço **sem perder nenhum acerto** — o que
+sobrava era justamente o "não relacionado" nas bordas. Esse é `"grow"` no preset.
+
+Já subir o corte de confiança custa, e o custo está medido: dos 43 clipes da rodada real, 22
+ficavam entre 0.35 e 0.60; mas no conjunto com gabarito, o acerto que vale 0.41 se perde e o
+placar vai de 3/4 para 2/4. O preset ficou em `0.6` porque uma compilação que alguém vende
+paga mais caro por um clipe errado do que por um faltando — e o seletor **confidence** no
+painel do canal move isso sem tocar em código.
+
+**Uma ideia que os números recusaram:** procurar direto no fim (últimos 20% em vez de 40%)
+parece economizar, mas mede pior — 2/4 em vez de 3/4 — *e* devolve clipes maiores (77 s
+contra 63 s). O algoritmo precisa de trecho comum antes do momento para saber o que é normal
+naquele vídeo; sem contexto, tudo parece alto e a região se espalha. Todos os momentos do
+gabarito começam entre 92% e 96% do vídeo, então a tentação é grande — mas a janela ficou nos
+40%. A economia de tempo veio de outro lugar: baixar em **360p** em vez de 480p, já que o
+CLIP encaixa tudo num quadrado de 224 px antes de olhar.
+
+### Uma segunda conta no mesmo PC
+
+`iniciar-compartilhado.cmd` + um atalho na área de trabalho da outra conta. Ele chama o
+`python.exe` pelo caminho inteiro (a outra conta não tem Python no PATH — que costuma ser o
+problema real, não permissão) e aponta `MULTISCREEN_CACHE` para o cache já existente. Assim
+os ~3,7 GB de Python, dependências e modelos são **compartilhados, não duplicados**, e um
+vídeo indexado por uma conta não é reindexado pela outra.
+
+`permitir-outro-usuario.ps1` confere o acesso e só libera o que faltar — e apenas três
+pastas, não o perfil inteiro. Numa conta de administrador ele normalmente responde "nada a
+fazer", porque o acesso já existe por herança.
 
 #### Como o preset foi calibrado (e por que "o último", não "o maior")
 
