@@ -489,6 +489,16 @@
                 border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
   .cast-state.on { border-color: #2ecc71; color: #2ecc71; }
   .cast-state.err { border-color: #e74c3c; color: #e74c3c; }
+  .cast-state.wait { border-color: #f1c40f; color: #f1c40f; }
+  .cast-sound { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px;
+                border: 1px solid var(--border); border-radius: 10px; }
+  .cast-offset { display: flex; align-items: center; gap: 10px; }
+  .cast-offset input[type="range"] { flex: 1; min-width: 0; }
+  .cast-offset .hint { flex: none; }
+  /* The audio twin: a real element that plays, parked off-screen (display:none
+     would be fine in Chrome but not everywhere). */
+  .cast-twin { position: fixed; left: -9999px; top: 0; width: 2px; height: 2px;
+               opacity: 0; pointer-events: none; }
   .cast-status { white-space: pre-line; line-height: 1.45; }
   .cast-tools { display: flex; align-items: center; gap: 6px; }
   .cast-tools label { cursor: pointer; font-size: 13px; }
@@ -1258,6 +1268,18 @@
         <label for="castClock" title="Shows the time to the millisecond on the wall — compare the PC with the TV to read the real delay">🕒 Clock in the corner (to measure the delay)</label>
       </div>
 
+      <div class="cast-sound">
+        <div class="cast-tools">
+          <input type="checkbox" id="castSync" checked>
+          <label for="castSync" title="The TV shows the screen a few seconds late (its HLS buffer). Each tile that has sound gets a hidden twin of itself playing that many seconds behind, so what you hear matches what the TV shows. Only tiles with sound pay for it.">🔈 Delay the sound here to meet the picture on the TV</label>
+        </div>
+        <div class="cast-offset">
+          <span class="hint" id="castDelayOut">TV delay: measuring…</span>
+          <input type="range" id="castOffset" min="-6" max="6" step="0.1" value="0" title="Fine-tune by ear: drag left if the sound arrives late, right if it arrives early">
+          <span class="hint" id="castOffsetOut">+0.0 s</span>
+        </div>
+      </div>
+
       <details class="cast-pair">
         <summary>Pair a TV…</summary>
         <div class="hint">Only a TV that is on and on this network right now can be paired. Once one is paired, every other renderer is blocked until you forget it.</div>
@@ -1270,6 +1292,7 @@
 
       <div class="modal-actions">
         <button type="button" id="castClose">Close</button>
+        <button type="button" id="castTest" disabled title="Sends colour bars with a counter — generated here, not your screen — through the very same lock and path. If they show up on the right TV, so will the wall.">🧪 Test pattern</button>
         <button type="button" id="castStop" disabled>■ Stop</button>
         <button type="button" id="castStart" class="primary" disabled>▶ Start casting</button>
       </div>
@@ -7054,6 +7077,11 @@
   const castStart = document.getElementById("castStart");
   const castStop = document.getElementById("castStop");
   const castClock = document.getElementById("castClock");
+  const castTest = document.getElementById("castTest");
+  const castSync = document.getElementById("castSync");
+  const castOffset = document.getElementById("castOffset");
+  const castOffsetOut = document.getElementById("castOffsetOut");
+  const castDelayOut = document.getElementById("castDelayOut");
   const castClockEl = document.createElement("div");
   castClockEl.id = "castClockEl";
   grid.appendChild(castClockEl);
@@ -7076,11 +7104,25 @@
     castIdent.textContent = p
       ? "UUID " + castShortUuid(p.uuid) + " \u00b7 MAC " + p.mac + " \u00b7 last seen at " + p.ip
       : "Open \u201cPair a TV\u201d below and pick yours. It is a one-time step.";
-    castState.textContent = st === "casting" ? "\u25cf LIVE" : st === "starting" ? "starting\u2026"
+    const testing = s.source === "test";
+    castState.textContent = st === "casting" ? (testing ? "\u25cf TEST PATTERN" : "\u25cf LIVE")
+                          : st === "starting" ? "starting\u2026"
+                          : st === "reconnecting" ? "TV away \u00b7 waiting\u2026"
                           : st === "error" ? "stopped" : "off";
-    castState.className = "cast-state" + (st === "casting" ? " on" : st === "error" ? " err" : "");
+    castState.className = "cast-state" + (st === "casting" ? " on" : st === "reconnecting" ? " wait"
+                                          : st === "error" ? " err" : "");
+    castDelayOut.textContent = s.latency ? "TV delay \u2248 " + s.latency.toFixed(1) + " s"
+                             : (st === "casting" ? "TV delay: measuring\u2026" : "TV delay: \u2014");
 
     const parts = [];
+    if (st === "casting" && testing) {
+      parts.push("Colour bars with a counter should be on " + (s.device ? s.device.name : "the TV") +
+                 " and nowhere else. Stop, then start the real thing.");
+    }
+    if (st === "reconnecting") {
+      parts.push("The TV stopped answering. The encoder is kept warm and the TV is checked every 10 s, " +
+                 "through the same UUID+MAC lock, for up to 3 min.");
+    }
     if (st === "casting") {
       const tv = s.tv || {};
       parts.push("TV says: " + (tv.state || "\u2026") + (tv.position ? " at " + tv.position : ""));
@@ -7099,11 +7141,13 @@
     castStatus.textContent = line;
     castStatus.hidden = !line;
 
-    const busy = st === "casting" || st === "starting";
+    const busy = st === "casting" || st === "starting" || st === "reconnecting";
     castStart.disabled = !p || busy;
+    castTest.disabled = !p || busy;
     castStop.disabled = !busy;
     castUnpair.disabled = !p || busy;
-    castBtn.textContent = st === "casting" ? "\ud83d\udce1 Casting" : "\ud83d\udce1 Cast";
+    castBtn.textContent = st === "casting" ? (testing ? "\ud83d\udce1 Testing" : "\ud83d\udce1 Casting")
+                        : st === "reconnecting" ? "\ud83d\udce1 TV away\u2026" : "\ud83d\udce1 Cast";
     castBtn.classList.toggle("live", st === "casting");
     // The wall may be fullscreen with the modal out of sight: say it out loud.
     if (before === "casting" && st === "error") toast("Cast stopped: " + (s.error || "unknown reason"), 7000);
@@ -7188,14 +7232,18 @@
     castScan();
   }
 
-  async function castDoStart() {
+  async function castDoStart(source) {
+    const screen = source !== "test";
     castStart.disabled = true;
-    const wentFull = !document.fullscreenElement && !!grid.requestFullscreen;
+    castTest.disabled = true;
+    // The test pattern is generated by ffmpeg, not grabbed from the screen:
+    // no fullscreen, and the modal stays open to show what the TV reports.
+    const wentFull = screen && !document.fullscreenElement && !!grid.requestFullscreen;
     if (wentFull) grid.requestFullscreen().catch(() => {});
-    castModal.classList.remove("open");
+    if (screen) castModal.classList.remove("open");
     let s;
     try {
-      s = await castPost("/api/cast/start");
+      s = await castPost("/api/cast/start", { source: screen ? "screen" : "test" });
     } catch (e) {
       s = { ok: false, error: e.message, state: "error", paired: castLast && castLast.paired };
     }
@@ -7206,7 +7254,8 @@
       toast("Cast: " + (s.error || "did not start"), 7000);
       return;
     }
-    toast("Casting to " + s.device.name + " \u2014 the sound stays here.", 4000);
+    if (screen) toast("Casting to " + s.device.name + " \u2014 the sound stays here.", 4000);
+    else toast("Test pattern sent to " + s.device.name + ". Look at the TV.", 5000);
   }
 
   async function castDoStop() {
@@ -7221,7 +7270,8 @@
   castBtn.addEventListener("click", openCastModal);
   castClose.addEventListener("click", closeCastModal);
   castModal.addEventListener("click", (e) => { if (e.target === castModal) closeCastModal(); });
-  castStart.addEventListener("click", castDoStart);
+  castStart.addEventListener("click", () => castDoStart("screen"));
+  castTest.addEventListener("click", () => castDoStart("test"));
   castStop.addEventListener("click", castDoStop);
   castRescan.addEventListener("click", castScan);
   castUnpair.addEventListener("click", castDoUnpair);
@@ -7245,9 +7295,108 @@
   // casting from an earlier page load, or the TV may have stopped.
   setInterval(() => {
     const open = castModal.classList.contains("open");
-    const live = castLast && (castLast.state === "casting" || castLast.state === "starting");
+    const live = castLast && (castLast.state === "casting" || castLast.state === "starting" ||
+                              castLast.state === "reconnecting");
     if (open || live) castRefresh();
   }, 4000);
+
+  /* --- The sound, delayed to meet the picture on the TV ---
+
+     The TV shows the screen several seconds late (its HLS buffer), so the
+     headphones would run ahead of it. Web Audio cannot delay these elements
+     (cross-origin media comes out silent, see the Trance ducking), so each
+     tile that has sound gets a hidden twin <video> of the same source running
+     `delay` seconds behind, while the visible one is turned down to zero.
+     Only tiles with sound pay for a second decode. Slow drift is fixed with
+     playbackRate (inaudible), a jump with a seek (one hiccup). */
+  const twins = new Map();   // player id -> { twin, video, hls, vol }
+
+  function castDelaySeconds() {
+    const base = castLast && castLast.latency ? castLast.latency : 0;
+    return Math.max(0, base + (parseFloat(castOffset.value) || 0));
+  }
+
+  function makeTwin(p) {
+    const video = p.media;
+    const hlsUrl = video._hls && video._hls.url;
+    const url = hlsUrl || video.currentSrc || video.src;
+    if (!url) return null;
+    const twin = document.createElement("video");
+    twin.className = "cast-twin";
+    twin.preload = "auto";
+    twin.loop = video.loop;
+    twin.playsInline = true;
+    twin.muted = false;
+    twin.volume = 1;
+    document.body.appendChild(twin);
+    let hls = null;
+    if (hlsUrl && window.Hls && Hls.isSupported()) {
+      hls = new Hls({ startLevel: 0, testBandwidth: false, capLevelToPlayerSize: false,
+                      maxBufferLength: 6, maxMaxBufferLength: 12, backBufferLength: 0,
+                      fragLoadingMaxRetry: 6 });
+      hls.loadSource(hlsUrl);
+      hls.attachMedia(twin);
+    } else {
+      twin.src = url;
+    }
+    return { twin, video, hls, vol: video.volume };
+  }
+
+  function dropTwin(id) {
+    const t = twins.get(id);
+    if (!t) return;
+    if (t.hls) { try { t.hls.destroy(); } catch (e) {} }
+    try { t.twin.pause(); t.twin.removeAttribute("src"); t.twin.load(); } catch (e) {}
+    t.twin.remove();
+    try { t.video.volume = t.vol || 1; } catch (e) {}
+    twins.delete(id);
+  }
+
+  function twinsTick() {
+    const on = castSync.checked && castLast && castLast.state === "casting" && castLast.source !== "test";
+    if (!on) { if (twins.size) [...twins.keys()].forEach(dropTwin); return; }
+    const delay = castDelaySeconds();
+    const seen = new Set();
+    players.forEach(p => {
+      const v = p.media;
+      if (!v || v.tagName !== "VIDEO" || v.muted) return;      // .muted is the user's intent; volume is ours
+      seen.add(p.id);
+      let t = twins.get(p.id);
+      if (!t) { t = makeTwin(p); if (!t) return; twins.set(p.id, t); }
+      const tw = t.twin;
+      try { if (v.volume !== 0) { t.vol = v.volume; v.volume = 0; } } catch (e) {}
+      if (v.paused || v.ended) { if (!tw.paused) tw.pause(); return; }
+      let target = v.currentTime - delay;
+      if (target < 0) {
+        // The twin is still in the previous lap of the loop.
+        if (v.loop && isFinite(v.duration) && v.duration > 0) target += v.duration;
+        else { if (!tw.paused) tw.pause(); return; }
+      }
+      if (tw.readyState < 1) return;
+      const diff = tw.currentTime - target;
+      if (Math.abs(diff) > 0.6) { tw.currentTime = target; tw.playbackRate = 1; }
+      else if (Math.abs(diff) > 0.1) tw.playbackRate = diff > 0 ? 0.96 : 1.04;
+      else tw.playbackRate = 1;
+      if (tw.paused) tw.play().catch(() => {});
+    });
+    [...twins.keys()].forEach(id => { if (!seen.has(id)) dropTwin(id); });
+  }
+  setInterval(twinsTick, 500);
+
+  castOffset.addEventListener("input", () => {
+    const v = parseFloat(castOffset.value) || 0;
+    castOffsetOut.textContent = (v >= 0 ? "+" : "") + v.toFixed(1) + " s";
+    try { localStorage.setItem("castOffset", String(v)); } catch (e) {}
+  });
+  castSync.addEventListener("change", () => {
+    try { localStorage.setItem("castSync", castSync.checked ? "1" : "0"); } catch (e) {}
+  });
+  try {
+    const savedOff = localStorage.getItem("castOffset");
+    if (savedOff !== null) { castOffset.value = savedOff; castOffset.dispatchEvent(new Event("input")); }
+    const savedSync = localStorage.getItem("castSync");
+    if (savedSync !== null) castSync.checked = savedSync === "1";
+  } catch (e) {}
   apiJson("/api/cast/status").then(castRender).catch(() => {});  // an older server has no /api/cast: stay quiet
 
   loadShrinkPrefs();

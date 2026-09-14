@@ -4451,6 +4451,9 @@ CAST_START_TIMEOUT = 25        # seconds for ffmpeg to produce those
 CAST_FIRST_FETCH_GRACE = 12    # accepted but never fetched by then = firewall
 CAST_POLL_SECONDS = 3
 CAST_PLAY_BUDGET = 12          # seconds to get from SetAVTransportURI to PLAYING
+CAST_RECONNECT_EVERY = 10      # while the TV is away: knock this often…
+CAST_RECONNECT_BUDGET = 180    # …for this long, then give up
+CAST_UNREACHABLE_POLLS = 2     # consecutive failed GetTransportInfo = TV is away
 CAST_MAX_RESTARTS = 3
 CAST_REPUSH_COOLDOWN = 30
 SSDP_ADDR, SSDP_PORT = "239.255.255.250", 1900
@@ -4462,8 +4465,12 @@ DLNA_FEATURES = "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=0170000000000000000
 
 _cast_lock = threading.Lock()
 _cast = {
-    "state": "idle",           # idle | starting | casting | error
+    "state": "idle",           # idle | starting | casting | reconnecting | error
+    "source": "screen",        # screen | test (the colour-bar pattern)
     "device": None,            # the verified target of this session
+    "anchor": None,            # (segment no., mtime) of the first .ts the TV took
+    "latency": None,           # seconds between capture and the TV showing it
+    "reconnect_since": None,
     "url": None, "dir": None, "proc": None, "log": None,
     "capture": None, "encoder": None, "fps": None, "speed": None,
     "tv_state": None, "tv_pos": None,
@@ -4479,7 +4486,13 @@ class CastRefused(Exception):
     """The lock (or a precondition) said no. The message is shown verbatim."""
 
 
+class CastAbsent(CastRefused):
+    """Nothing wrong with the identity — the paired TV just isn't answering.
+    The only refusal the monitor is allowed to wait out."""
+
+
 # --- identity -------------------------------------------------------------
+
 
 def _cast_load_device():
     try:
@@ -4609,7 +4622,7 @@ def cast_verify_target():
         raise CastRefused("no TV paired yet — open Cast and pair yours first.")
     devices = cast_discover()
     if not devices:
-        raise CastRefused("no DLNA renderer answered on the network. Is the TV on?")
+        raise CastAbsent("no DLNA renderer answered on the network. Is the TV on?")
     ok = [d for d in devices if _cast_check(paired, d) is None]
     if len(ok) > 1:
         raise CastRefused("more than one device matches the paired TV — refusing to guess.")
@@ -4617,8 +4630,8 @@ def cast_verify_target():
         same = [d for d in devices if d["uuid"] == paired["uuid"]]
         if same:
             raise CastRefused("refused: " + _cast_check(paired, same[0]))
-        raise CastRefused("the paired TV (%s) is not on the network — %d other renderer(s) "
-                          "answered and were ignored." % (paired["name"], len(devices)))
+        raise CastAbsent("the paired TV (%s) is not on the network — %d other renderer(s) "
+                         "answered and were ignored." % (paired["name"], len(devices)))
     return ok[0]
 
 
@@ -4644,6 +4657,7 @@ def cast_pair(uuid_):
 
 
 # --- talking to the TV ------------------------------------------------------
+
 
 def _cast_soap(control, action, body=""):
     envelope = (
@@ -4733,6 +4747,7 @@ def _cast_tv_state(control):
 
 # --- the screen encoder -----------------------------------------------------
 
+
 def _cast_input_args(mode):
     if mode == "ddagrab":
         # Desktop Duplication: the frame is grabbed on the GPU. It comes out as
@@ -4772,11 +4787,17 @@ def _cast_probe_capture():
     return None
 
 
-def _cast_ffmpeg_cmd(mode, outdir):
+def _cast_ffmpeg_cmd(mode, outdir, source="screen"):
     gop = CAST_FPS * CAST_SEGMENT_SECONDS
     cmd = [FFMPEG, "-hide_banner", "-loglevel", "warning", "-nostats",
            "-progress", "pipe:1"]
-    cmd += _cast_input_args(mode)
+    if source == "test":
+        # Colour bars with a running counter, generated here: something
+        # unmistakably ours on the TV before the real wall ever goes out.
+        cmd += ["-re", "-f", "lavfi", "-i", "testsrc=size=1920x1080:rate=%d" % CAST_FPS,
+                "-vf", "format=nv12"]
+    else:
+        cmd += _cast_input_args(mode)
     # -an is the whole audio story: there is no track for the TV to play.
     cmd += ["-an", "-fps_mode", "cfr", "-r", str(CAST_FPS)]
     cmd += _venc_args(VIDEO_ENCODER)
@@ -4821,14 +4842,17 @@ def _cast_log_tail(path, n=6):
         return ""
 
 
-def _cast_spawn(outdir):
-    mode = _cast_probe_capture()
-    if not mode:
-        raise CastRefused("this ffmpeg cannot capture the screen (no ddagrab/gdigrab). "
-                          "Install a full build (winget install Gyan.FFmpeg) and restart.")
+def _cast_spawn(outdir, source="screen"):
+    if source == "test":
+        mode = "test"
+    else:
+        mode = _cast_probe_capture()
+        if not mode:
+            raise CastRefused("this ffmpeg cannot capture the screen (no ddagrab/gdigrab). "
+                              "Install a full build (winget install Gyan.FFmpeg) and restart.")
     log = os.path.join(outdir, "ffmpeg.log")
     errf = open(log, "w", encoding="utf-8")
-    proc = subprocess.Popen(_cast_ffmpeg_cmd(mode, outdir), stdout=subprocess.PIPE,
+    proc = subprocess.Popen(_cast_ffmpeg_cmd(mode, outdir, source), stdout=subprocess.PIPE,
                             stderr=errf, stdin=subprocess.DEVNULL)
     try:
         os.makedirs(MS_CACHE_HOME, exist_ok=True)
@@ -4907,6 +4931,7 @@ def _cast_reap_orphan():
 
 # --- the LAN listener ---------------------------------------------------------
 
+
 class CastHandler(BaseHTTPRequestHandler):
     """Serves the live HLS to the paired TV, and to nobody else."""
 
@@ -4944,7 +4969,7 @@ class CastHandler(BaseHTTPRequestHandler):
         with _cast_lock:
             dev, outdir, state = _cast["device"], _cast["dir"], _cast["state"]
         client = self.client_address[0]
-        if not dev or client != dev["ip"] or state not in ("starting", "casting"):
+        if not dev or client != dev["ip"] or state not in ("starting", "casting", "reconnecting"):
             sys.stderr.write("  [cast] refused %s %s\n" % (client, self.path))
             return self._deny(403)
         m = self._path_re.match(self.path.split("?", 1)[0])
@@ -4996,6 +5021,14 @@ class CastHandler(BaseHTTPRequestHandler):
                 _cast["first_fetch"] = time.time()
             if name.endswith(".ts") and not head:
                 _cast["served"] += 1
+                if _cast["anchor"] is None:
+                    # The TV counts its position from the first segment it
+                    # takes; remembering when that one was written turns its
+                    # RelTime into "how far behind the screen am I".
+                    try:
+                        _cast["anchor"] = (int(re.sub(r"\D", "", name)), os.path.getmtime(path))
+                    except (ValueError, OSError):
+                        pass
 
 
 def _cast_lan_ip(target_ip):
@@ -5036,13 +5069,17 @@ def _cast_ensure_server(lan_ip):
 
 # --- the session ----------------------------------------------------------------
 
+
 def cast_status():
     with _cast_lock:
         s = dict(_cast)
-    casting = s["state"] == "casting" and s["started"]
+    casting = s["state"] in ("casting", "reconnecting") and s["started"]
     return {
         "ok": True,
         "state": s["state"],
+        "source": s["source"],
+        "latency": round(s["latency"], 1) if s["latency"] is not None else None,
+        "reconnect_since": s["reconnect_since"],
         "paired": _cast_load_device(),
         "device": s["device"],
         "url": s["url"],
@@ -5063,8 +5100,9 @@ def _cast_teardown(error=None):
         proc, dev, outdir, was = _cast["proc"], _cast["device"], _cast["dir"], _cast["state"]
         _cast.update(state="error" if error else "idle", proc=None, url=None, dir=None,
                      error=error, fps=None, speed=None, started=None,
-                     tv_state=None, tv_pos=None)
-    if dev and was in ("casting", "starting"):
+                     tv_state=None, tv_pos=None, anchor=None, latency=None,
+                     reconnect_since=None)
+    if dev and was in ("casting", "starting", "reconnecting"):
         try:
             _cast_soap(dev["control"], "Stop")
         except Exception:  # noqa: BLE001
@@ -5079,13 +5117,17 @@ def cast_stop():
     return cast_status()
 
 
-def cast_start():
+def cast_start(source="screen"):
+    """Start casting the screen — or, with source="test", the colour-bar
+    pattern: same lock, same listener, same push, so a pattern showing up on
+    the right TV proves the whole path before any real picture goes out."""
     with _cast_lock:
-        if _cast["state"] in ("starting", "casting"):
+        if _cast["state"] in ("starting", "casting", "reconnecting"):
             return cast_status()
-        _cast.update(state="starting", error=None, warning=None, url=None,
+        _cast.update(state="starting", source=source, error=None, warning=None, url=None,
                      served=0, first_fetch=None, restarts=0, repushes=0,
-                     fps=None, speed=None, tv_state=None, tv_pos=None)
+                     fps=None, speed=None, tv_state=None, tv_pos=None,
+                     anchor=None, latency=None, reconnect_since=None)
     try:
         if not FFMPEG:
             raise CastRefused("ffmpeg not found on the server. Install it (winget install "
@@ -5096,19 +5138,19 @@ def cast_start():
         outdir = tempfile.mkdtemp(prefix="multiscreen_cast_")
         with _cast_lock:
             _cast.update(device=target, dir=outdir)
-        proc, mode, log = _cast_spawn(outdir)
+        proc, mode, log = _cast_spawn(outdir, source)
         with _cast_lock:
             _cast.update(proc=proc, capture=mode, encoder=VIDEO_ENCODER, log=log)
         if not _cast_wait_playlist(outdir, proc):
             tail = _cast_log_tail(log)
-            raise CastRefused("the screen encoder did not start" + (": " + tail if tail else "."))
+            raise CastRefused("the encoder did not start" + (": " + tail if tail else "."))
         url = "http://%s:%d/cast/live.m3u8" % (lan_ip, port)
         _cast_push(target, url)
         with _cast_lock:
             _cast.update(state="casting", url=url, started=time.time())
         threading.Thread(target=_cast_monitor, args=(proc,), daemon=True).start()
-        sys.stderr.write("  [cast] %s (%s) <- %s via %s/%s\n"
-                         % (target["name"], target["mac"], url, mode, VIDEO_ENCODER))
+        sys.stderr.write("  [cast] %s (%s) <- %s via %s/%s [%s]\n"
+                         % (target["name"], target["mac"], url, mode, VIDEO_ENCODER, source))
     except CastRefused as exc:
         _cast_teardown(error=str(exc))
         raise
@@ -5118,40 +5160,88 @@ def cast_start():
     return cast_status()
 
 
+def _cast_reltime(text):
+    """'0:01:02.345' -> 62.345; None when the TV sends nothing usable."""
+    try:
+        h, m, s = text.strip().split(":")
+        return int(h) * 3600 + int(m) * 60 + float(s)
+    except (AttributeError, ValueError):
+        return None
+
+
 def _cast_monitor(proc):
     """While casting: keep ffmpeg alive, ask the TV what it is doing, push
-    again if it stopped, and say so when the TV never came for the stream."""
+    again if it stopped, wait for it if it goes away, estimate how far behind
+    the screen it is, and say so when it never came for the stream."""
     stopped_polls = 0
+    unreachable = 0
     last_repush = 0.0
+    last_knock = 0.0
     while True:
         time.sleep(CAST_POLL_SECONDS)
         with _cast_lock:
-            if _cast["state"] != "casting" or _cast["proc"] is not proc:
+            if _cast["state"] not in ("casting", "reconnecting") or _cast["proc"] is not proc:
                 return
             snap = dict(_cast)
 
+        # 1. The encoder. Restart it in a fresh directory (segment numbers
+        #    start over, so the TV needs the URL handed to it again).
         if proc.poll() is not None:
             tail = _cast_log_tail(snap["log"])
             if snap["restarts"] >= CAST_MAX_RESTARTS:
-                _cast_teardown(error="the screen encoder keeps dying" + (": " + tail if tail else "."))
+                _cast_teardown(error="the encoder keeps dying" + (": " + tail if tail else "."))
                 return
             try:
                 newdir = tempfile.mkdtemp(prefix="multiscreen_cast_")
-                newproc, _mode, newlog = _cast_spawn(newdir)
+                newproc, _mode, newlog = _cast_spawn(newdir, snap["source"])
                 if not _cast_wait_playlist(newdir, newproc):
                     raise CastRefused("encoder restart failed: " + _cast_log_tail(newlog))
                 with _cast_lock:
-                    _cast.update(proc=newproc, dir=newdir, log=newlog)
+                    _cast.update(proc=newproc, dir=newdir, log=newlog, anchor=None, latency=None)
                     _cast["restarts"] += 1
                     _cast["warning"] = "the encoder died and was restarted" + (" (" + tail + ")" if tail else "")
                 shutil.rmtree(snap["dir"], ignore_errors=True)
-                _cast_push(snap["device"], snap["url"])
+                if snap["state"] == "casting":
+                    _cast_push(snap["device"], snap["url"])
                 proc = newproc
             except Exception as exc:  # noqa: BLE001
                 _cast_teardown(error=str(exc))
                 return
             continue
 
+        # 2. The TV is away (off, rebooting, on another input). Keep the
+        #    encoder warm and knock every few seconds — through the same
+        #    lock as any push — until it is back or the budget runs out.
+        if snap["state"] == "reconnecting":
+            if time.time() - snap["reconnect_since"] > CAST_RECONNECT_BUDGET:
+                _cast_teardown(error="the TV did not come back within %d minutes"
+                               % (CAST_RECONNECT_BUDGET // 60))
+                return
+            if time.time() - last_knock < CAST_RECONNECT_EVERY:
+                continue
+            last_knock = time.time()
+            try:
+                target = cast_verify_target()
+                _cast_push(target, snap["url"])
+            except CastAbsent:
+                continue
+            except CastRefused as exc:
+                _cast_teardown(error=str(exc))
+                return
+            except Exception as exc:  # noqa: BLE001
+                with _cast_lock:
+                    _cast["warning"] = "the TV is back but the push failed: %s" % exc
+                continue
+            away = int(time.time() - snap["reconnect_since"])
+            with _cast_lock:
+                _cast.update(state="casting", device=target, reconnect_since=None,
+                             anchor=None, latency=None, tv_state=None, tv_pos=None)
+                _cast["repushes"] += 1
+                _cast["warning"] = "the TV was away for %ds - the stream was pushed again" % away
+            unreachable = stopped_polls = 0
+            continue
+
+        # 3. Accepted but never fetched: the packets are not arriving.
         if snap["first_fetch"] is None and time.time() - snap["started"] > CAST_FIRST_FETCH_GRACE:
             port = urllib.parse.urlparse(snap["url"]).port
             with _cast_lock:
@@ -5159,13 +5249,35 @@ def _cast_monitor(proc):
                                     "a firewall on this PC is probably blocking TCP port %d "
                                     "for python.exe" % port)
 
+        # 4. Ask the TV. Two misses in a row and it is considered away.
         try:
             st, pos = _cast_tv_state(snap["device"]["control"])
         except Exception:  # noqa: BLE001
-            st, pos = None, None
+            unreachable += 1
+            if unreachable >= CAST_UNREACHABLE_POLLS:
+                with _cast_lock:
+                    _cast.update(state="reconnecting", reconnect_since=time.time(),
+                                 tv_state=None, tv_pos=None,
+                                 warning="the TV stopped answering - waiting for it to come back")
+                last_knock = 0.0
+            continue
+        unreachable = 0
+
+        # 5. Latency: the TV counts RelTime from the first segment it took,
+        #    and we know when that segment was written. Smoothed, because the
+        #    TV reports in steps and drifts a little.
+        rel = _cast_reltime(pos) if pos else None
         with _cast_lock:
             _cast["tv_state"], _cast["tv_pos"] = st, pos
+            anchor = _cast["anchor"]
+            if anchor and rel is not None and st == "PLAYING":
+                shown_at = anchor[1] - CAST_SEGMENT_SECONDS + rel   # when what is on the TV now was captured
+                est = time.time() - shown_at
+                if 0.0 < est < 120.0:
+                    old = _cast["latency"]
+                    _cast["latency"] = est if old is None else old * 0.7 + est * 0.3
 
+        # 6. The TV stopped on its own: hand the stream over again.
         stopped_polls = stopped_polls + 1 if st in ("STOPPED", "NO_MEDIA_PRESENT") else 0
         if stopped_polls >= 2 and time.time() - last_repush > CAST_REPUSH_COOLDOWN:
             stopped_polls = 0
@@ -5175,9 +5287,14 @@ def _cast_monitor(proc):
                 target = cast_verify_target()
                 _cast_push(target, snap["url"])
                 with _cast_lock:
-                    _cast["device"] = target
+                    _cast.update(device=target, anchor=None, latency=None)
                     _cast["repushes"] += 1
-                    _cast["warning"] = "the TV had stopped — the stream was pushed again"
+                    _cast["warning"] = "the TV had stopped - the stream was pushed again"
+            except CastAbsent:
+                with _cast_lock:
+                    _cast.update(state="reconnecting", reconnect_since=time.time(),
+                                 warning="the TV went away - waiting for it to come back")
+                last_knock = time.time()
             except CastRefused as exc:
                 _cast_teardown(error=str(exc))
                 return
@@ -7077,9 +7194,10 @@ class Handler(BaseHTTPRequestHandler):
         return self.send_json({"ok": True, "paired": None})
 
     def handle_cast_start(self):
-        self._cast_body()
+        data = self._cast_body()
+        source = "test" if str(data.get("source") or "") == "test" else "screen"
         try:
-            return self.send_json(cast_start())
+            return self.send_json(cast_start(source))
         except CastRefused as exc:
             return self.send_json(dict(cast_status(), ok=False, error=str(exc)), 403)
         except Exception as exc:  # noqa: BLE001

@@ -224,21 +224,44 @@ isso nada aqui "escolhe a primeira TV que aparecer":
 `python server.py --cast-selftest` prova a trava na rede real: a TV pareada tem que
 passar e todo outro renderer tem que ser recusado. Rode antes de mexer no cast.
 
+**🧪 Test pattern** é a prova pelos olhos: manda barras coloridas com um contador —
+geradas pelo ffmpeg, não a sua tela — pela **mesma** verificação, pelo mesmo listener e
+pelo mesmo push. Se as barras aparecerem na TV certa (e em nenhuma outra), o caminho
+inteiro está provado antes de qualquer vídeo real ir pro ar. Depois é Stop e Start.
+
 ### Enquanto toca
 
 O modal mostra o que **a própria TV reporta** (`PLAYING` e a posição, via
 `GetTransportInfo`), o fps e a velocidade do encoder, e quantos segmentos já foram
 servidos. Se o encoder cair, é reiniciado e o stream re-entregue; se a TV parar (ela às
 vezes larga um stream ao vivo), é empurrado de novo — sempre passando pela mesma trava.
-Se a TV aceitar o stream mas nunca vier buscar, o aviso aponta o firewall do Windows
-(porta TCP `principal + 50` pro `python.exe`).
+Se a TV **sumir** (desligou, trocou de entrada, reiniciou), o encoder fica aquecido e o
+servidor bate na porta dela a cada 10 s por até 3 min, e retoma sozinho quando ela
+volta — de novo pela mesma verificação de UUID + MAC; nunca por "apareceu uma TV". Se a
+TV aceitar o stream mas nunca vier buscar, o aviso aponta o firewall do Windows (porta
+TCP `principal + 50` pro `python.exe`).
 
-**🕒 Clock in the corner** desenha um relógio com milissegundos na grade. Olhe o PC e a
-TV ao mesmo tempo e a diferença é o atraso real — alguns segundos, pelo buffer HLS da TV.
-O som do fone chega antes da imagem da TV; compensar isso (atrasar o áudio do PC) é um
-passo à parte, ainda não feito. Não dá pra resolver com um `DelayNode`, porque
-`createMediaElementSource` silencia mídia cross-origin e a parede é cheia dela; o
-caminho é um `<audio>` gêmeo atrasado, só nos tiles que estão com som.
+### O som, atrasado pra encontrar a imagem
+
+A TV mostra a tela **10–12 s depois** (é o buffer HLS da Samsung, e varia), então o fone
+correria na frente. Dois pedaços resolvem isso:
+
+- **Medir o atraso sem relógio na tela.** A TV conta a posição (`RelTime`, com
+  milissegundos) a partir do primeiro segmento que pegou, e o servidor sabe quando esse
+  segmento foi escrito: `atraso = agora − (escrita do segmento inicial + RelTime)`. Sai
+  contínuo, suavizado, e segue a TV quando ela rebufferiza. Aparece no modal como
+  `TV delay ≈ 10.4 s`. **🕒 Clock in the corner** continua lá pra conferir a olho.
+- **Um gêmeo de áudio por tile com som.** `createMediaElementSource` silencia mídia
+  cross-origin (o ducking do Trance já esbarrou nisso), então `DelayNode` está fora. Em
+  vez disso, cada `<video>` que está com som ganha um gêmeo escondido da mesma fonte,
+  tocando `atraso` segundos atrás, enquanto o visível fica com volume zero. Só quem tem
+  som paga o segundo decode (numa parede de 40, um ou dois). Deriva lenta é corrigida
+  com `playbackRate` 0,96–1,04, salto com um seek. O slider **±3 s** ajusta no ouvido; o
+  toggle **🔈 Delay the sound…** desliga tudo e devolve o volume.
+
+Onde não chega: iframes (YouTube/Vimeo/Twitch) ficam de fora, como no mudo global; a
+precisão prática é ~±0,3–0,5 s; e na virada do loop o gêmeo ainda está no fim da volta
+anterior, então dá um soluço por volta.
 
 ### Detalhes que custaram uma tarde
 
