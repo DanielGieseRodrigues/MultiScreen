@@ -4454,6 +4454,15 @@ CAST_PLAY_BUDGET = 12          # seconds to get from SetAVTransportURI to PLAYIN
 CAST_RECONNECT_EVERY = 10      # while the TV is away: knock this often…
 CAST_RECONNECT_BUDGET = 180    # …for this long, then give up
 CAST_UNREACHABLE_POLLS = 2     # consecutive failed GetTransportInfo = TV is away
+# The owner's mark: a word the TV's name MUST carry, on top of UUID and MAC.
+# A TV without it cannot even be paired. Comma-separated, case-insensitive.
+CAST_OWNER_MARKS = tuple(m.strip().lower() for m in
+                         os.environ.get("MULTISCREEN_CAST_OWNER", "dani").split(",") if m.strip())
+# A screen cast needs a test pattern that reached THIS TV within this many
+# minutes (and since this server started). 0 turns the requirement off.
+CAST_REQUIRE_TEST_MINUTES = int(os.environ.get("MULTISCREEN_CAST_REQUIRE_TEST_MINUTES", "30"))
+CAST_AUDIT_FILE = os.path.join(MS_CACHE_HOME, "cast_audit.log")
+CAST_MAC_CACHE_SECONDS = 30
 CAST_MAX_RESTARTS = 3
 CAST_REPUSH_COOLDOWN = 30
 SSDP_ADDR, SSDP_PORT = "239.255.255.250", 1900
@@ -4471,6 +4480,7 @@ _cast = {
     "anchor": None,            # (segment no., mtime) of the first .ts the TV took
     "latency": None,           # seconds between capture and the TV showing it
     "reconnect_since": None,
+    "checks": [],              # the locks the last verification passed, in order
     "url": None, "dir": None, "proc": None, "log": None,
     "capture": None, "encoder": None, "fps": None, "speed": None,
     "tv_state": None, "tv_pos": None,
@@ -4479,6 +4489,8 @@ _cast = {
     "warning": None, "error": None,
 }
 _cast_server = None            # (httpd, ip, port) of the LAN listener
+_cast_last_test = None         # {"uuid", "mac", "at"}: the last test pattern the TV played
+_cast_mac_cache = {}           # ip -> (mac, looked_up_at), for the listener's MAC check
 _cast_capture_mode = None      # "ddagrab" | "gdigrab" | "x11grab", probed once
 
 
@@ -4489,6 +4501,23 @@ class CastRefused(Exception):
 class CastAbsent(CastRefused):
     """Nothing wrong with the identity — the paired TV just isn't answering.
     The only refusal the monitor is allowed to wait out."""
+
+
+# --- audit trail ---------------------------------------------------------------
+
+def _cast_audit(event, device=None, **fields):
+    """One line per push, refusal and stop: who, when, where to. Never raises."""
+    try:
+        os.makedirs(MS_CACHE_HOME, exist_ok=True)
+        parts = [time.strftime("%Y-%m-%dT%H:%M:%S"), event]
+        if device:
+            parts.append("%s uuid=%s mac=%s ip=%s" % (device.get("name"), device.get("uuid"),
+                                                     device.get("mac"), device.get("ip")))
+        parts += ["%s=%s" % (k, v) for k, v in fields.items() if v is not None]
+        with open(CAST_AUDIT_FILE, "a", encoding="utf-8") as f:
+            f.write("  ".join(str(p) for p in parts) + "\n")
+    except Exception:  # noqa: BLE001
+        pass
 
 
 # --- identity -------------------------------------------------------------
@@ -4599,8 +4628,18 @@ def cast_discover(timeout=3.0):
     return found
 
 
+def _cast_owner_mark(name):
+    """The owner mark found in `name`, or None."""
+    low = (name or "").lower()
+    for mark in CAST_OWNER_MARKS:
+        if mark in low:
+            return mark
+    return None
+
+
 def _cast_check(paired, dev):
-    """Why `dev` may NOT stand in for the paired TV — None when it may."""
+    """Why `dev` may NOT stand in for the paired TV — None when it may.
+    Each line is an independent lock; the first that fails is the answer."""
     if dev["uuid"] != paired["uuid"]:
         return "UUID differs"
     if not dev.get("mac"):
@@ -4611,12 +4650,21 @@ def _cast_check(paired, dev):
     if dev["name"] != paired["name"]:
         return ("UUID matches but the name changed (%r now, %r when paired)"
                 % (dev["name"], paired["name"]))
+    if CAST_OWNER_MARKS and not _cast_owner_mark(dev["name"]):
+        return "the name %r carries none of the owner marks %s" % (dev["name"], list(CAST_OWNER_MARKS))
+    if paired.get("model") and dev.get("model") != paired["model"]:
+        return ("UUID matches but the model changed (%r now, %r when paired)"
+                % (dev.get("model"), paired["model"]))
+    host = urllib.parse.urlparse(dev["control"]).hostname
+    if host != dev["ip"]:
+        return "its control URL points at %s, not at the device itself (%s)" % (host, dev["ip"])
     return None
 
 
 def cast_verify_target():
     """The one renderer allowed to receive the stream, verified on the network
-    this very moment. Refuses rather than guess."""
+    this very moment. Refuses rather than guess, and records which locks the
+    winner passed so the UI can show them."""
     paired = _cast_load_device()
     if not paired:
         raise CastRefused("no TV paired yet — open Cast and pair yours first.")
@@ -4625,19 +4673,37 @@ def cast_verify_target():
         raise CastAbsent("no DLNA renderer answered on the network. Is the TV on?")
     ok = [d for d in devices if _cast_check(paired, d) is None]
     if len(ok) > 1:
+        _cast_audit("refused", None, reason="more than one device matches")
         raise CastRefused("more than one device matches the paired TV — refusing to guess.")
     if not ok:
         same = [d for d in devices if d["uuid"] == paired["uuid"]]
         if same:
-            raise CastRefused("refused: " + _cast_check(paired, same[0]))
+            why = _cast_check(paired, same[0])
+            _cast_audit("refused", same[0], reason=why)
+            raise CastRefused("refused: " + why)
         raise CastAbsent("the paired TV (%s) is not on the network — %d other renderer(s) "
                          "answered and were ignored." % (paired["name"], len(devices)))
-    return ok[0]
+    dev = ok[0]
+    checks = [
+        "UUID matches (…%s)" % dev["uuid"][-12:],
+        "MAC matches (%s)" % dev["mac"],
+        "name matches (%s)" % dev["name"],
+        "model matches (%s)" % dev.get("model"),
+        "only one match among %d renderer(s)" % len(devices),
+        "control URL is on the device itself (%s)" % dev["ip"],
+    ]
+    mark = _cast_owner_mark(dev["name"])
+    if mark:
+        checks.insert(3, "owner mark '%s' in the name" % mark)
+    with _cast_lock:
+        _cast["checks"] = checks
+    return dev
 
 
 def cast_pair(uuid_):
     """Pin one renderer as THE target. Only a device answering right now can
-    be paired, because the MAC comes from talking to it."""
+    be paired (the MAC comes from talking to it), and only one whose name
+    carries the owner's mark — so the wrong TV cannot be paired by a slip."""
     if not uuid_:
         raise CastRefused("no device chosen.")
     match = [d for d in cast_discover() if d["uuid"] == uuid_]
@@ -4650,13 +4716,16 @@ def cast_pair(uuid_):
     if not dev["mac"]:
         raise CastRefused("could not read the TV's MAC address from the ARP table; "
                           "pairing needs it.")
+    if CAST_OWNER_MARKS and not _cast_owner_mark(dev["name"]):
+        _cast_audit("pair-refused", dev, reason="no owner mark")
+        raise CastRefused("refused to pair %r: its name carries none of the owner marks %s. "
+                          "This lock exists so a TV that is not yours can never be paired "
+                          "by a slip of the mouse." % (dev["name"], list(CAST_OWNER_MARKS)))
     rec = {"uuid": dev["uuid"], "mac": dev["mac"], "name": dev["name"],
            "model": dev["model"], "ip": dev["ip"], "paired_at": time.time()}
     _cast_save_device(rec)
+    _cast_audit("paired", dev)
     return rec
-
-
-# --- talking to the TV ------------------------------------------------------
 
 
 def _cast_soap(control, action, body=""):
@@ -4715,6 +4784,26 @@ def _cast_push(device, url):
     _cast_soap(ctrl, "SetAVTransportURI",
                "<CurrentURI>%s</CurrentURI><CurrentURIMetaData>%s</CurrentURIMetaData>"
                % (url, _cast_didl(url, "MultiScreen")))
+    # The TV must now report OUR url as its current media. Anything else —
+    # or a different device having answered — and we stop right here.
+    try:
+        info = _cast_soap(ctrl, "GetMediaInfo")
+    except Exception:  # noqa: BLE001
+        info = ""
+    echo = re.search(r"<CurrentURI>([^<]*)<", info)
+    echo = echo.group(1).strip().replace("&amp;", "&") if echo else ""
+    if echo and echo != url:
+        try:
+            _cast_soap(ctrl, "Stop")
+        except Exception:  # noqa: BLE001
+            pass
+        _cast_audit("refused", device, reason="URI echo mismatch", got=echo)
+        raise CastRefused("the TV reports a different media URI than the one handed to it "
+                          "(%s) — stopping." % echo)
+    with _cast_lock:
+        _cast["checks"] = [c for c in _cast["checks"] if not c.startswith("TV echoes")]
+        _cast["checks"].append("TV echoes our URL back" if echo else "TV echoes: not reported")
+    _cast_audit("push", device, source=_cast["source"], url=url)
     deadline = time.time() + CAST_PLAY_BUDGET
     last = None
     while time.time() < deadline:
@@ -4969,7 +5058,8 @@ class CastHandler(BaseHTTPRequestHandler):
         with _cast_lock:
             dev, outdir, state = _cast["device"], _cast["dir"], _cast["state"]
         client = self.client_address[0]
-        if not dev or client != dev["ip"] or state not in ("starting", "casting", "reconnecting"):
+        if (not dev or client != dev["ip"] or state not in ("starting", "casting", "reconnecting")
+                or not _cast_client_mac_ok(client, dev["mac"])):
             sys.stderr.write("  [cast] refused %s %s\n" % (client, self.path))
             return self._deny(403)
         m = self._path_re.match(self.path.split("?", 1)[0])
@@ -5031,6 +5121,17 @@ class CastHandler(BaseHTTPRequestHandler):
                         pass
 
 
+def _cast_client_mac_ok(ip, mac):
+    """Does the ARP table say `ip` is the paired MAC? Cached briefly: the TV
+    asks for a segment every second, `arp` is a process."""
+    now = time.time()
+    hit = _cast_mac_cache.get(ip)
+    if not hit or now - hit[1] > CAST_MAC_CACHE_SECONDS:
+        hit = (_cast_mac_for(ip), now)
+        _cast_mac_cache[ip] = hit
+    return hit[0] is not None and hit[0] == mac
+
+
 def _cast_lan_ip(target_ip):
     """Our address on the interface that reaches the TV (no packet is sent)."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -5078,6 +5179,12 @@ def cast_status():
         "ok": True,
         "state": s["state"],
         "source": s["source"],
+        "checks": list(s["checks"]),
+        "owner_marks": list(CAST_OWNER_MARKS),
+        "require_test_minutes": CAST_REQUIRE_TEST_MINUTES,
+        "test_ok_until": (_cast_last_test["at"] + CAST_REQUIRE_TEST_MINUTES * 60)
+                         if _cast_last_test else None,
+        "test_ok_for": _cast_last_test["uuid"] if _cast_last_test else None,
         "latency": round(s["latency"], 1) if s["latency"] is not None else None,
         "reconnect_since": s["reconnect_since"],
         "paired": _cast_load_device(),
@@ -5107,6 +5214,7 @@ def _cast_teardown(error=None):
             _cast_soap(dev["control"], "Stop")
         except Exception:  # noqa: BLE001
             pass
+        _cast_audit("stop", dev, reason=error)
     _cast_kill(proc)
     if outdir:
         shutil.rmtree(outdir, ignore_errors=True)
@@ -5133,6 +5241,21 @@ def cast_start(source="screen"):
             raise CastRefused("ffmpeg not found on the server. Install it (winget install "
                               "Gyan.FFmpeg, or pip install imageio-ffmpeg) and restart.")
         target = cast_verify_target()
+        if source == "screen" and CAST_REQUIRE_TEST_MINUTES > 0:
+            last = _cast_last_test
+            fresh = (last and last["uuid"] == target["uuid"] and last["mac"] == target["mac"]
+                     and time.time() - last["at"] < CAST_REQUIRE_TEST_MINUTES * 60)
+            if not fresh:
+                _cast_audit("refused", target, reason="no fresh test pattern")
+                raise CastRefused("test pattern first: a screen cast needs a test pattern that "
+                                  "played on %s within the last %d min%s." % (
+                                      target["name"], CAST_REQUIRE_TEST_MINUTES,
+                                      " (none since this server started)" if not last
+                                      else " (the last one ended %d min ago)"
+                                      % int((time.time() - last["at"]) // 60)))
+            with _cast_lock:
+                _cast["checks"].append("test pattern played here %d min ago"
+                                       % int((time.time() - last["at"]) // 60))
         lan_ip = _cast_lan_ip(target["ip"])
         port = _cast_ensure_server(lan_ip)
         outdir = tempfile.mkdtemp(prefix="multiscreen_cast_")
@@ -5267,6 +5390,11 @@ def _cast_monitor(proc):
         #    and we know when that segment was written. Smoothed, because the
         #    TV reports in steps and drifts a little.
         rel = _cast_reltime(pos) if pos else None
+        if snap["source"] == "test" and st == "PLAYING" and snap["served"] > 0:
+            # The pattern is on that screen: this TV, this UUID+MAC, now.
+            global _cast_last_test
+            _cast_last_test = {"uuid": snap["device"]["uuid"], "mac": snap["device"]["mac"],
+                               "at": time.time()}
         with _cast_lock:
             _cast["tv_state"], _cast["tv_pos"] = st, pos
             anchor = _cast["anchor"]
@@ -5319,6 +5447,11 @@ def cast_selftest():
         print("FAIL: no TV paired - pair one in the app first.")
         return 1
     ok = True
+    print("  owner marks: %s   (a name without one can be neither paired nor cast to)"
+          % list(CAST_OWNER_MARKS))
+    if CAST_OWNER_MARKS and not _cast_owner_mark(paired["name"]):
+        print("FAIL: the paired TV's own name %r carries no owner mark" % paired["name"])
+        ok = False
     try:
         t = cast_verify_target()
         print("PASS: would cast to %s (%s, %s)" % (t["name"], t["ip"], t["mac"]))

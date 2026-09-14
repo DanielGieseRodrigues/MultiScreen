@@ -500,6 +500,8 @@
   .cast-twin { position: fixed; left: -9999px; top: 0; width: 2px; height: 2px;
                opacity: 0; pointer-events: none; }
   .cast-status { white-space: pre-line; line-height: 1.45; }
+  .cast-checks { font-size: 12px; line-height: 1.5; color: var(--muted); }
+  .cast-checks b { color: #2ecc71; font-weight: 600; }
   .cast-tools { display: flex; align-items: center; gap: 6px; }
   .cast-tools label { cursor: pointer; font-size: 13px; }
   .cast-pair summary { cursor: pointer; color: var(--muted); font-size: 13px; }
@@ -1260,6 +1262,8 @@
         </div>
         <div class="cast-state" id="castState">off</div>
       </div>
+
+      <div class="cast-checks" id="castChecks"></div>
 
       <div class="cast-status hint" id="castStatus" hidden></div>
 
@@ -7082,6 +7086,7 @@
   const castOffset = document.getElementById("castOffset");
   const castOffsetOut = document.getElementById("castOffsetOut");
   const castDelayOut = document.getElementById("castDelayOut");
+  const castChecks = document.getElementById("castChecks");
   const castClockEl = document.createElement("div");
   castClockEl.id = "castClockEl";
   grid.appendChild(castClockEl);
@@ -7094,6 +7099,8 @@
   }
 
   function castShortUuid(u) { return (u || "").replace(/^uuid:/, "").slice(0, 8) + "\u2026"; }
+  function castBusy(st) { return st === "casting" || st === "starting" || st === "reconnecting"; }
+  function castEsc(t) { return String(t).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
 
   function castRender(s) {
     const before = castLast ? castLast.state : null;
@@ -7141,8 +7148,29 @@
     castStatus.textContent = line;
     castStatus.hidden = !line;
 
-    const busy = st === "casting" || st === "starting" || st === "reconnecting";
-    castStart.disabled = !p || busy;
+    // The locks: what the last start passed, or what every start will check.
+    const marks = (s.owner_marks || []).map(m => "'" + m + "'").join(", ");
+    const testFresh = !!(s.test_ok_until && s.test_ok_until * 1000 > Date.now() &&
+                         p && s.test_ok_for === p.uuid);
+    const needTest = (s.require_test_minutes || 0) > 0 && !testFresh;
+    if (s.checks && s.checks.length && (castBusy(st) || st === "error")) {
+      castChecks.innerHTML = "Locks passed before the last hand-over: " +
+        s.checks.map(c => "<b>\u2713</b> " + castEsc(c)).join(" \u00b7 ");
+    } else {
+      castChecks.textContent = "Before every hand-over, live on the network: UUID \u00b7 MAC \u00b7 name" +
+        (marks ? " \u00b7 owner mark " + marks + " in the name" : "") +
+        " \u00b7 model \u00b7 exactly one match \u00b7 control URL on the device \u00b7 the TV echoes our URL" +
+        " \u00b7 stream served only to that IP+MAC" +
+        ((s.require_test_minutes || 0) > 0
+          ? " \u00b7 a test pattern played there in the last " + s.require_test_minutes + " min" +
+            (testFresh ? " (\u2713 " + Math.max(1, Math.round((s.test_ok_until * 1000 - Date.now()) / 60000)) + " min left)"
+                       : " (\u2717 run \ud83e\uddea Test pattern first)")
+          : "");
+    }
+    const busy = castBusy(st);
+    castStart.disabled = !p || busy || needTest;
+    castStart.title = needTest ? "Run the test pattern first: the wall only goes out to a TV that just showed the pattern."
+                               : "Mirror the wall to the paired TV (goes fullscreen)";
     castTest.disabled = !p || busy;
     castStop.disabled = !busy;
     castUnpair.disabled = !p || busy;
@@ -7327,7 +7355,7 @@
     twin.loop = video.loop;
     twin.playsInline = true;
     twin.muted = false;
-    twin.volume = 1;
+    twin.volume = video.volume;   // the tile's level moves to the twin
     document.body.appendChild(twin);
     let hls = null;
     if (hlsUrl && window.Hls && Hls.isSupported()) {
@@ -7339,13 +7367,27 @@
     } else {
       twin.src = url;
     }
-    return { twin, video, hls, vol: video.volume };
+    const t = { twin, video, hls, vol: video.volume };
+    // The visible tile is held at zero, so its slider is the only way the
+    // user can still ask for a level: catch the drag, hand the level to the
+    // twin, put the visible one back to zero. (The slider snaps back; the
+    // sound follows.)
+    t.onVol = () => {
+      if (video.volume > 0) {
+        t.vol = video.volume;
+        twin.volume = t.vol;
+        try { video.volume = 0; } catch (e) {}
+      }
+    };
+    video.addEventListener("volumechange", t.onVol);
+    return t;
   }
 
   function dropTwin(id) {
     const t = twins.get(id);
     if (!t) return;
     if (t.hls) { try { t.hls.destroy(); } catch (e) {} }
+    t.video.removeEventListener("volumechange", t.onVol);
     try { t.twin.pause(); t.twin.removeAttribute("src"); t.twin.load(); } catch (e) {}
     t.twin.remove();
     try { t.video.volume = t.vol || 1; } catch (e) {}
@@ -7364,7 +7406,7 @@
       let t = twins.get(p.id);
       if (!t) { t = makeTwin(p); if (!t) return; twins.set(p.id, t); }
       const tw = t.twin;
-      try { if (v.volume !== 0) { t.vol = v.volume; v.volume = 0; } } catch (e) {}
+      try { if (v.volume !== 0) t.onVol(); } catch (e) {}
       if (v.paused || v.ended) { if (!tw.paused) tw.pause(); return; }
       let target = v.currentTime - delay;
       if (target < 0) {

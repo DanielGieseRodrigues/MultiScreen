@@ -221,6 +221,28 @@ isso nada aqui "escolhe a primeira TV que aparecer":
   **só ao IP da TV pareada** — qualquer outro cliente, inclusive o próprio PC, leva 403. O
   servidor principal, com proxy e arquivos locais, continua só em `127.0.0.1`.
 
+Isso é o núcleo da feature, então são **várias travas independentes**, e todas têm que
+passar, ao vivo, antes de cada entrega do stream (start, re-push, retomada):
+
+1. **UUID** do *MediaRenderer* igual ao pareado.
+2. **MAC** igual (lido da tabela ARP do IP que respondeu).
+3. **Nome** igual ao pareado.
+4. **Marca de dono no nome** — por padrão `dani`, case-insensitive (`MULTISCREEN_CAST_OWNER`
+   aceita uma lista separada por vírgula). Uma TV sem a marca não pode nem ser **pareada**.
+5. **Modelo** igual.
+6. **Exatamente um** aparelho casando; dois ou nenhum é recusa.
+7. **Control URL** apontando pro próprio IP do aparelho.
+8. **Eco da URL**: depois do `SetAVTransportURI`, `GetMediaInfo` tem que devolver exatamente a
+   nossa URL — a NU7100 devolve — senão `Stop` e abortar.
+9. **Listener** servindo só a quem tem o **IP e o MAC** da TV pareada (ARP, cache de 30 s).
+10. **Teste obrigatório**: o cast da tela só sai se um 🧪 Test pattern chegou a `PLAYING`
+    **nessa mesma TV** (UUID+MAC) nos últimos 30 min e desde que este servidor subiu
+    (`MULTISCREEN_CAST_REQUIRE_TEST_MINUTES`, `0` desliga). O botão Start fica desabilitado
+    até isso acontecer.
+
+Cada push, recusa, pareamento e stop vai pra `~/.cache/multiscreen/cast_audit.log`, com
+hora, nome, UUID, MAC, IP e fonte. O modal lista as travas que o último start passou.
+
 `python server.py --cast-selftest` prova a trava na rede real: a TV pareada tem que
 passar e todo outro renderer tem que ser recusado. Rode antes de mexer no cast.
 
