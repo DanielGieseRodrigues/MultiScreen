@@ -19,7 +19,7 @@
     --text: #e9edf4;
     --muted: #8b93a3;
     --danger: #ff5a5a;
-    --gap: 6px;
+    --gap: 0px; /* tiles touch edge to edge; raise to 6px to bring the seams back */
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { height: 100%; }
@@ -136,9 +136,9 @@
   .cell {
     position: relative;
     background: #000;
-    border-radius: 10px;
+    border-radius: 0;
     overflow: hidden;
-    border: 1px solid var(--border);
+    border: 0; /* no frame: neighbouring videos meet with no visible seam */
     min-height: 0;
   }
   .cell video, .cell iframe {
